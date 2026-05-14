@@ -180,6 +180,12 @@
           "type": "array",
           "items": { "$ref": "#/$defs/componentBinding" },
           "description": "Reverse index: components that declare this token in their tokenBindings. Optional and derivable from component files."
+        },
+        "documentBlocks": {
+          "type": "array",
+          "items": { "$ref": "document-block.schema.json" },
+          "minItems": 1,
+          "description": "Typed prose blocks for this token. See spec/document-blocks.md (Phase 9)."
         }
       },
       "additionalProperties": false
@@ -258,6 +264,12 @@
           "type": "array",
           "items": { "$ref": "#/$defs/componentBinding" },
           "description": "Reverse index: components that declare this token in their tokenBindings. Optional and derivable from component files."
+        },
+        "documentBlocks": {
+          "type": "array",
+          "items": { "$ref": "document-block.schema.json" },
+          "minItems": 1,
+          "description": "Typed prose blocks for this token. See spec/document-blocks.md (Phase 9)."
         }
       },
       "additionalProperties": false
