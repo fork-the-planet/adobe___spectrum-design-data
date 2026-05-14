@@ -149,6 +149,15 @@ enum Commands {
         #[arg(long, value_name = "DIR")]
         dimensions_dir: Option<PathBuf>,
     },
+    /// Return the full component declaration for a given component identifier
+    Component {
+        /// Component identifier (e.g. "button", "action-bar")
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Override components directory
+        #[arg(long, value_name = "DIR")]
+        components_dir: Option<PathBuf>,
+    },
     /// Create or update a product-context.json document for a product-layer working copy
     Write {
         /// Path to the product context JSON file to create or update
@@ -1002,6 +1011,42 @@ fn run_primer(
     Ok(ExitCode::SUCCESS)
 }
 
+fn run_component(id: &str, components_dir: Option<PathBuf>) -> miette::Result<ExitCode> {
+    // Reject IDs that could escape the components directory via path traversal.
+    if !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        || id.is_empty()
+        || !id.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+    {
+        eprintln!("Invalid component ID '{id}'. IDs must match ^[a-z][a-z0-9-]*$");
+        return Ok(ExitCode::from(1));
+    }
+
+    let dir = components_dir
+        .or_else(default_components_path)
+        .ok_or_else(|| miette::miette!("could not locate components directory"))?;
+
+    let file = dir.join(format!("{id}.json"));
+    if file.is_file() {
+        let raw = std::fs::read_to_string(&file)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to read {}", file.display()))?;
+        let doc: serde_json::Value = serde_json::from_str(&raw)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to parse {}", file.display()))?;
+        println!("{}", serde_json::to_string_pretty(&doc).into_diagnostic()?);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let available = scan_json_name_field(&dir);
+    eprintln!("Component '{id}' not found.");
+    if available.is_empty() {
+        eprintln!("No components found in {}", dir.display());
+    } else {
+        eprintln!("Available components: {}", available.join(", "));
+    }
+    Ok(ExitCode::from(1))
+}
+
 fn run_write(output: &Path, rationale: Option<&str>) -> miette::Result<ExitCode> {
     let mut doc: serde_json::Value = if output.exists() {
         let raw = std::fs::read_to_string(output)
@@ -1168,6 +1213,7 @@ fn main() -> ExitCode {
             let target = path.unwrap_or_else(|| PathBuf::from("."));
             run_primer(&target, format, components_dir, fields_dir, dimensions_dir)
         }
+        Commands::Component { id, components_dir } => run_component(&id, components_dir),
         Commands::Write { output, rationale } => {
             run_write(&output, rationale.as_deref())
         }
