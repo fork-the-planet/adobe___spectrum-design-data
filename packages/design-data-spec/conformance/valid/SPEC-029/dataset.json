@@ -9,10 +9,15 @@
         "category": "actions",
         "documentationUrl": "https://spectrum.adobe.com/page/button/"
       },
-      "anatomy": [
-        { "name": "label", "description": "Button text." },
-        { "name": "icon", "description": "Leading icon." },
-        { "name": "label", "description": "Duplicate label part." }
+      "documentBlocks": [
+        {
+          "type": "purpose",
+          "content": "Triggers an action when clicked."
+        },
+        {
+          "type": "usage",
+          "content": "Place in forms and dialogs."
+        }
       ]
     }
   ]

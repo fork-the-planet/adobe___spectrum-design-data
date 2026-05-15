@@ -1,5 +1,14 @@
 {
-  "tokens": [],
+  "tokens": [
+    {
+      "name": {
+        "component": "button",
+        "anatomy": "label",
+        "property": "color"
+      },
+      "value": "#ffffff"
+    }
+  ],
   "components": [
     {
       "$id": "https://opensource.adobe.com/spectrum-design-data/schemas/v0/components/button.json",
@@ -9,11 +18,7 @@
         "category": "actions",
         "documentationUrl": "https://spectrum.adobe.com/page/button/"
       },
-      "anatomy": [
-        { "name": "label", "description": "Button text." },
-        { "name": "icon", "description": "Leading icon." },
-        { "name": "label", "description": "Duplicate label part." }
-      ]
+      "anatomy": [{ "name": "label", "description": "Button text." }]
     }
   ]
 }
