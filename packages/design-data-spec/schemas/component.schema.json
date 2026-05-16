@@ -158,6 +158,14 @@
           "type": "string",
           "format": "uri-reference",
           "description": "Reference to a shared type schema."
+        },
+        "deprecatedEnumValues": {
+          "type": "object",
+          "description": "Per-enum-value lifecycle metadata keyed by enum value string. Values absent from this map are not deprecated. Consumed by SPEC-037.",
+          "$comment": "Keys are not validated against sibling 'enum' — JSON Schema cannot cross-reference sibling values without unevaluatedProperties. Entries for values absent from 'enum' are silently ignored by validators. A future SPEC rule may close this gap.",
+          "additionalProperties": {
+            "$ref": "#/$defs/lifecycle"
+          }
         }
       },
       "additionalProperties": true
@@ -209,6 +217,10 @@
           "type": "array",
           "items": { "$ref": "document-block.schema.json" },
           "description": "Typed prose blocks for this anatomy part. See spec/document-blocks.md (Phase 9)."
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/lifecycle",
+          "description": "Version lifecycle metadata for this anatomy part. Set lifecycle.deprecated to signal that tokens referencing this part should migrate."
         }
       },
       "additionalProperties": false
@@ -255,6 +267,10 @@
           "type": "boolean",
           "default": false,
           "description": "Whether this state prevents all user interaction. See spec/accessibility.md."
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/lifecycle",
+          "description": "Version lifecycle metadata for this state. Set lifecycle.deprecated to signal that tokens referencing this state should migrate."
         }
       },
       "additionalProperties": false
