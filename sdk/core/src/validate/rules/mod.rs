@@ -50,8 +50,39 @@ mod spec038;
 mod spec039;
 mod spec040;
 mod spec041;
+mod spec042;
+mod spec043;
 
 use std::collections::HashSet;
+
+/// Domain → `$schema` URL suffix mapping shared by SPEC-042 and SPEC-043.
+/// Update this list when new token-type schemas are introduced; both rules
+/// pick up the change automatically.
+pub(super) const DOMAIN_SCHEMAS: &[(&str, &[&str])] = &[
+    ("color", &["color.json", "color-set.json", "gradient-stop.json"]),
+    (
+        "typography",
+        &[
+            "font-family.json",
+            "font-weight.json",
+            "font-style.json",
+            "font-size.json",
+            "typography.json",
+        ],
+    ),
+    (
+        "motion",
+        &["duration.json", "easing.json", "motion.json", "motion-set.json"],
+    ),
+];
+
+/// Returns the domain name for a token's `$schema` URL, or `None` if not a known domain type.
+pub(super) fn schema_domain(schema_url: &str) -> Option<&'static str> {
+    DOMAIN_SCHEMAS
+        .iter()
+        .find(|(_, suffixes)| suffixes.iter().any(|s| schema_url.ends_with(s)))
+        .map(|(domain, _)| *domain)
+}
 use std::sync::OnceLock;
 
 use crate::graph::TokenGraph;
@@ -108,6 +139,8 @@ pub fn default_rules() -> Vec<Box<dyn ValidationRule>> {
         Box::new(spec039::Rule),
         Box::new(spec040::Rule),
         Box::new(spec041::Rule),
+        Box::new(spec042::Rule),
+        Box::new(spec043::Rule),
     ]
 }
 
