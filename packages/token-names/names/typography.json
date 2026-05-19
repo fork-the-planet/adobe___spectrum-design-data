@@ -1,4 +1,8 @@
 {
+  "body-margin-multiplier": {
+    "structure": "body",
+    "property": "margin"
+  },
   "black-font-weight": {
     "property": "font-weight",
     "weight": "black"
@@ -7,6 +11,16 @@
     "property": "font-weight",
     "weight": "bold"
   },
+  "cjk-line-height-100": {
+    "property": "line-height-multiplier",
+    "family": "cjk",
+    "scaleIndex": 100
+  },
+  "cjk-line-height-200": {
+    "property": "line-height-multiplier",
+    "family": "cjk",
+    "scaleIndex": 200
+  },
   "cjk-font-family": {
     "property": "font-family",
     "family": "cjk"
@@ -14,6 +28,14 @@
   "code-font-family": {
     "property": "font-family",
     "family": "code"
+  },
+  "detail-margin-bottom-multiplier": {
+    "structure": "detail",
+    "property": "margin-bottom"
+  },
+  "detail-margin-top-multiplier": {
+    "structure": "detail",
+    "property": "margin-top"
   },
   "default-font-style": {
     "property": "font-style",
@@ -95,9 +117,25 @@
     "property": "font-size",
     "scaleIndex": 900
   },
+  "heading-margin-bottom-multiplier": {
+    "structure": "heading",
+    "property": "margin-bottom"
+  },
+  "heading-margin-top-multiplier": {
+    "structure": "heading",
+    "property": "margin-top"
+  },
   "italic-font-style": {
     "property": "font-style",
     "style": "italic"
+  },
+  "line-height-100": {
+    "property": "line-height-multiplier",
+    "scaleIndex": 100
+  },
+  "line-height-200": {
+    "property": "line-height-multiplier",
+    "scaleIndex": 200
   },
   "letter-spacing": {
     "property": "letter-spacing"
