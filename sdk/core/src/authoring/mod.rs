@@ -8,15 +8,7 @@
 // OF ANY KIND, either express or implied. See the License for the specific language
 // governing permissions and limitations under the License.
 
-import test from "ava";
-import { createMCPServer, createAllTools } from "../src/index.js";
+//! Token authoring — wizard DTOs and MCP session state machine (RFC #973 Q4).
 
-test("server initializes", (t) => {
-  const server = createMCPServer();
-  t.truthy(server);
-});
-
-test("server exposes 15 tools", (t) => {
-  const tools = createAllTools();
-  t.is(tools.length, 15);
-});
+pub mod draft;
+pub mod session;
