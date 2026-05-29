@@ -116,6 +116,13 @@ dist
 # Rust (design-data SDK workspace)
 sdk/target/
 
+# design-data platform binary slots — tracked placeholder shell scripts are
+# committed in sdk/npm/{platform}/bin/; real compiled binaries are written
+# there by CI immediately before `npm publish` and are NEVER committed.
+# CI does not run `git add` / `git commit`, so accidental commits only
+# happen locally. If a real binary ends up staged, remove it with:
+#   git restore --staged sdk/npm/darwin-arm64/bin/design-data
+
 # visual studio code
 .vscode/
 
