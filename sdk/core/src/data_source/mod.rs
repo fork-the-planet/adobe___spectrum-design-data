@@ -20,12 +20,15 @@
 //!    return [`DataSourceError::NotYetImplemented`] until `#1050` lands.
 //! 3. **CWD-relative probing** — tries `packages/tokens/…` and
 //!    `packages/design-data-spec/…` relative to `cwd`.  Preserves the original
-//!    in-monorepo behaviour as the last resort, so existing workflows are unaffected.
-//! 4. **Embedded snapshot** — baked into the binary at build time.
-//!    Filled in by `#1049`; absent until then (tier silently skipped).
+//!    in-monorepo behaviour when run from inside a checkout.
+//! 4. **Embedded snapshot** — baked into the binary at compile time via
+//!    `include_dir!`; materialized to the OS cache dir on first use.
+//!    This is the zero-config offline default for designers running outside the repo.
 //!
 //! [`resolve`] returns a [`ResolvedData`] with concrete [`PathBuf`]s for every
 //! location the CLI needs.
+
+pub(crate) mod embedded;
 
 use std::path::{Path, PathBuf};
 
@@ -263,13 +266,57 @@ pub fn resolve(
     }
 
     // Tier 3: CWD-relative probing — original in-monorepo behaviour.
-    // Tier 4 (cache) and tier 5 (embedded) are stubs filled in by #1050 / #1049.
+    // If we are inside a monorepo checkout probe will find everything; return immediately.
+    if is_in_repo(cwd) {
+        return Ok(probe_cwd(cwd, overrides));
+    }
+
+    // Tier 4: Embedded snapshot — materialize to the OS cache dir on first use.
+    // Non-fatal: if materialization fails (no cache dir, IO error, etc.) we fall
+    // through so existing users outside a repo aren't broken.
+    match embedded::materialize() {
+        Ok(root) => {
+            return Ok(from_root(
+                &root,
+                overrides,
+                Provenance::Embedded {
+                    version: embedded::EMBEDDED_TOKENS_VERSION,
+                },
+            ));
+        }
+        Err(e) => {
+            // Only surface the warning under debug logging — materialisation
+            // failures are non-fatal and the message would be noisy in scripts.
+            if std::env::var("DESIGN_DATA_LOG").as_deref() == Ok("debug") {
+                eprintln!(
+                    "design-data: warning: embedded snapshot materialization failed ({e}); \
+                     falling back to in-repo probing"
+                );
+            }
+        }
+    }
+
+    // Tier 3 fallback: CWD probing (will likely find nothing outside a repo, but
+    // callers handle None fields gracefully).
     Ok(probe_cwd(cwd, overrides))
 }
 
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Returns `true` when `cwd` is inside a monorepo checkout.
+///
+/// Walks up the ancestor chain from `cwd` looking for a directory that contains
+/// `packages/tokens/schemas/token-types`.  This works regardless of how deeply
+/// nested `cwd` is inside the repo (repo root, `sdk/`, `packages/tokens/`, etc.).
+///
+/// When this returns `true` the resolver skips the embedded tier and uses
+/// CWD-relative probing instead, preserving the original in-monorepo workflow.
+fn is_in_repo(cwd: &Path) -> bool {
+    cwd.ancestors()
+        .any(|dir| dir.join("packages/tokens/schemas/token-types").is_dir())
+}
 
 /// Walk ancestors of `start` looking for `.design-data.toml`.
 ///
@@ -341,10 +388,17 @@ fn from_root(root: &Path, overrides: &CliPathOverrides, provenance: Provenance) 
     }
 }
 
-/// Tier 3: replicate the original `default_*_path()` probing logic.
+/// Tier 3: replicate the original `default_*_path()` probing logic verbatim.
 ///
-/// Tries both `packages/…` (run from repo root) and `../packages/…` (run from
-/// inside `sdk/`), exactly matching the previous per-function behaviour.
+/// Tries `packages/…` (run from repo root) and `../packages/…` (run from one
+/// level below the root, e.g. `sdk/`).  Returns `None` for any path not found —
+/// preserving the pre-resolver behaviour exactly for every existing working directory.
+///
+/// NOTE: `is_in_repo` uses an ancestor-walk so it returns `true` from ANY
+/// subdirectory of the repo.  This function intentionally keeps the original
+/// two-candidate probing so that callers running from deeply-nested dirs (e.g.
+/// `packages/tokens/`) get `None` for spec dirs they can't reach — the same
+/// result they got before the resolver was introduced.
 fn probe_cwd(cwd: &Path, overrides: &CliPathOverrides) -> ResolvedData {
     // tokens_root — original default was PathBuf::from(".") i.e. CWD.
     let tokens_root = overrides
@@ -441,7 +495,13 @@ fn resolve_schema_root(overrides: &CliPathOverrides, fallback: impl FnOnce() -> 
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    // Serialize all tests that mutate process-global env vars (DESIGN_DATA_CACHE_DIR,
+    // DESIGN_DATA_SCHEMA_ROOT).  Rust runs tests in parallel by default, so without
+    // this lock two tests setting the same var will race.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_monorepo(dir: &Path) {
         fs::create_dir_all(dir.join("packages/tokens/schemas/token-types")).unwrap();
@@ -471,17 +531,25 @@ mod tests {
     }
 
     #[test]
-    fn probe_tokens_root_defaults_to_cwd() {
+    fn probe_tokens_root_defaults_to_cwd_when_in_repo() {
+        // In-repo: tokens_root defaults to the CWD (original "." behaviour).
         let tmp = TempDir::new().unwrap();
+        make_monorepo(tmp.path()); // creates schemas/token-types → is_in_repo = true
         let resolved = resolve(tmp.path(), &CliPathOverrides::default()).unwrap();
+        assert_eq!(resolved.provenance, Provenance::InRepo);
         assert_eq!(resolved.tokens_root, tmp.path());
     }
 
     #[test]
-    fn probe_returns_none_for_absent_spec_dirs() {
+    fn probe_returns_none_for_absent_spec_dirs_when_in_repo() {
+        // When inside a repo (schemas/token-types present) but spec dirs are absent,
+        // probe returns None fields for those paths.
         let tmp = TempDir::new().unwrap();
-        // No spec dirs present.
+        // Only create the minimal structure to trigger is_in_repo — no spec dirs.
+        fs::create_dir_all(tmp.path().join("packages/tokens/schemas/token-types")).unwrap();
+
         let resolved = resolve(tmp.path(), &CliPathOverrides::default()).unwrap();
+        assert_eq!(resolved.provenance, Provenance::InRepo);
         assert!(resolved.mode_sets.is_none());
         assert!(resolved.components.is_none());
         assert!(resolved.fields.is_none());
@@ -618,6 +686,7 @@ mod tests {
 
     #[test]
     fn env_var_schema_root_wins_over_probe() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tmp = TempDir::new().unwrap();
         make_monorepo(tmp.path());
 
@@ -631,5 +700,60 @@ mod tests {
         std::env::remove_var("DESIGN_DATA_SCHEMA_ROOT");
 
         assert_eq!(resolved.schemas_root, custom);
+    }
+
+    // --- Tier 4: Embedded snapshot ---
+
+    #[test]
+    fn resolve_outside_repo_uses_embedded_tier() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // A completely empty temp dir has no monorepo layout, so is_in_repo returns
+        // false and the resolver must fall through to the embedded tier.
+        // Set DESIGN_DATA_CACHE_DIR to a temp path to avoid writing to the real OS
+        // cache during tests.
+        let cache_tmp = TempDir::new().unwrap();
+        std::env::set_var("DESIGN_DATA_CACHE_DIR", cache_tmp.path());
+
+        let cwd_tmp = TempDir::new().unwrap();
+        let resolved = resolve(cwd_tmp.path(), &CliPathOverrides::default()).unwrap();
+        std::env::remove_var("DESIGN_DATA_CACHE_DIR");
+
+        assert!(
+            matches!(resolved.provenance, Provenance::Embedded { .. }),
+            "expected Embedded provenance outside the repo, got {:?}",
+            resolved.provenance
+        );
+        assert!(
+            resolved.tokens_root.exists(),
+            "tokens_root should be materialized"
+        );
+        assert!(
+            resolved.schemas_root.join("token-types").is_dir(),
+            "schemas_root/token-types should exist in the embedded snapshot"
+        );
+    }
+
+    #[test]
+    fn cli_override_wins_over_embedded() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Set DESIGN_DATA_CACHE_DIR to a temp path to avoid writing to the real OS
+        // cache during tests.
+        let cache_tmp = TempDir::new().unwrap();
+        std::env::set_var("DESIGN_DATA_CACHE_DIR", cache_tmp.path());
+
+        let cwd_tmp = TempDir::new().unwrap();
+        let custom_schema = cwd_tmp.path().join("custom-schemas");
+        fs::create_dir_all(&custom_schema).unwrap();
+
+        let overrides = CliPathOverrides {
+            schema_root: Some(custom_schema.clone()),
+            ..Default::default()
+        };
+        let resolved = resolve(cwd_tmp.path(), &overrides).unwrap();
+        std::env::remove_var("DESIGN_DATA_CACHE_DIR");
+
+        // Provenance is Embedded (we're outside the repo) but the schema override wins.
+        assert!(matches!(resolved.provenance, Provenance::Embedded { .. }));
+        assert_eq!(resolved.schemas_root, custom_schema);
     }
 }
