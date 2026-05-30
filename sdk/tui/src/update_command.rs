@@ -19,13 +19,12 @@
 
 use std::collections::HashSet;
 
-use design_data_core::cascade::{self, specificity};
-use design_data_core::diff::display_name;
-use design_data_core::graph::{TokenGraph, TokenRecord};
+use design_data_core::cascade::resolve_property;
 
 use crate::app::{
-    ActiveView, DescribeView, DiagnosticRow, Modal, QueryRow, QueryView, ResolvedRow, ResolveView,
-    StatusMessage, ValidateView, HISTORY_CAP, layer_str, parse_resolve_args, save_palette_history,
+    parse_resolve_args, resolve_context_with_restrictions, save_palette_history, ActiveView,
+    DescribeView, DiagnosticRow, Modal, QueryRow, QueryView, ResolveView, ResolvedRow,
+    StatusMessage, ValidateView, HISTORY_CAP,
 };
 use crate::find::FindWizardState;
 use crate::message::Message;
@@ -66,7 +65,10 @@ pub(crate) fn handle_palette_submit(
         model.palette_history.insert(0, raw.clone());
         model.palette_history.truncate(HISTORY_CAP);
         let snap = model.palette_history.clone();
-        Task::cmd(move || { save_palette_history(&snap); Message::Tick })
+        Task::cmd(move || {
+            save_palette_history(&snap);
+            Message::Tick
+        })
     } else {
         Task::none()
     };
@@ -96,24 +98,25 @@ fn dispatch_command(
     match cmd {
         "query" => {
             if rest.is_empty() {
-                model.status_message =
-                    Some(StatusMessage::error("query: expression required"));
+                model.status_message = Some(StatusMessage::error("query: expression required"));
                 return Task::none();
             }
             match design_data_core::query::parse(rest) {
                 Ok(expr) => {
-                    let records = design_data_core::query::filter(ctx.graph, &expr);
+                    let records = design_data_core::query::filter_with_index(
+                        ctx.graph,
+                        &ctx.token_index,
+                        &expr,
+                    );
                     let rows: Vec<QueryRow> =
                         records.iter().map(|r| QueryRow::from_record(r)).collect();
                     let count = rows.len();
-                    model.active_view =
-                        ActiveView::Query(QueryView::new(rest.to_string(), rows));
+                    model.active_view = ActiveView::Query(QueryView::new(rest.to_string(), rows));
                     model.status_message =
                         Some(StatusMessage::info(format!("{count} token(s) matched")));
                 }
                 Err(e) => {
-                    model.status_message =
-                        Some(StatusMessage::error(format!("query error: {e}")));
+                    model.status_message = Some(StatusMessage::error(format!("query error: {e}")));
                 }
             }
             Task::none()
@@ -127,89 +130,22 @@ fn dispatch_command(
             let (prop, res_ctx) = match parse_resolve_args(rest) {
                 Ok(v) => v,
                 Err(e) => {
-                    model.status_message =
-                        Some(StatusMessage::error(format!("resolve: {e}")));
+                    model.status_message = Some(StatusMessage::error(format!("resolve: {e}")));
                     return Task::none();
                 }
             };
-            let candidates: Vec<TokenRecord> = ctx
-                .graph
-                .tokens
-                .values()
-                .filter(|t| {
-                    t.raw
-                        .get("name")
-                        .and_then(|v| v.as_object())
-                        .and_then(|n| n.get("property"))
-                        .and_then(|v| v.as_str())
-                        == Some(prop.as_str())
-                })
-                .cloned()
-                .collect();
+            let res_ctx = resolve_context_with_restrictions(res_ctx, &ctx.mode_set_restrictions);
+            let candidates = resolve_property(ctx.graph, &prop, &res_ctx);
             if candidates.is_empty() {
-                model.active_view =
-                    ActiveView::Resolve(ResolveView::new(prop, vec![]));
+                model.active_view = ActiveView::Resolve(ResolveView::new(prop, vec![]));
                 model.status_message = Some(StatusMessage::info("no match"));
                 return Task::none();
             }
-            let filtered_graph = TokenGraph::from_records(candidates)
-                .with_mode_sets(ctx.graph.mode_sets.clone());
-            let mut with_spec: Vec<(&TokenRecord, u32)> = filtered_graph
-                .tokens
-                .values()
-                .map(|t| {
-                    let s = t
-                        .raw
-                        .get("name")
-                        .and_then(|v| v.as_object())
-                        .map(|n| specificity(n, &filtered_graph.mode_sets))
-                        .unwrap_or(0);
-                    (t, s)
-                })
-                .collect();
-            with_spec.sort_by(|(a, sa), (b, sb)| {
-                b.layer
-                    .cmp(&a.layer)
-                    .then_with(|| sb.cmp(sa))
-                    .then_with(|| a.file.cmp(&b.file))
-                    .then_with(|| a.index.cmp(&b.index))
-            });
-            let winner = cascade::resolve(&filtered_graph, &res_ctx);
-            let rows: Vec<ResolvedRow> = with_spec
-                .iter()
-                .map(|(t, spec)| {
-                    let value = t
-                        .raw
-                        .get("value")
-                        .map(|v| {
-                            if v.is_string() {
-                                v.as_str().unwrap_or("").to_string()
-                            } else {
-                                v.to_string()
-                            }
-                        })
-                        .or_else(|| t.alias_target.clone())
-                        .unwrap_or_default();
-                    let file = t
-                        .file
-                        .file_name()
-                        .map(|f| f.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let is_winner = winner.map(|w| w.name == t.name).unwrap_or(false);
-                    ResolvedRow {
-                        name: display_name(t),
-                        value,
-                        file,
-                        layer: layer_str(t.layer).to_string(),
-                        specificity: *spec,
-                        is_winner,
-                    }
-                })
-                .collect();
+            let rows: Vec<ResolvedRow> =
+                candidates.iter().map(ResolvedRow::from_candidate).collect();
             let count = rows.len();
             model.active_view = ActiveView::Resolve(ResolveView::new(prop, rows));
-            model.status_message =
-                Some(StatusMessage::info(format!("{count} candidate(s)")));
+            model.status_message = Some(StatusMessage::info(format!("{count} candidate(s)")));
             Task::none()
         }
         "describe" | "component" => {
@@ -223,7 +159,9 @@ fn dispatch_command(
             let id = rest.trim();
             if id.is_empty()
                 || !id.chars().next().is_some_and(|c| c.is_ascii_lowercase())
-                || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
             {
                 model.status_message =
                     Some(StatusMessage::error(format!("invalid component ID '{id}'")));
@@ -249,26 +187,28 @@ fn dispatch_command(
                                 model.status_message = None;
                             }
                             Err(e) => {
-                                model.status_message = Some(StatusMessage::error(
-                                    format!("describe: render error: {e}"),
-                                ));
+                                model.status_message = Some(StatusMessage::error(format!(
+                                    "describe: render error: {e}"
+                                )));
                             }
                         },
                         Err(e) => {
-                            model.status_message = Some(StatusMessage::error(
-                                format!("describe: parse error: {e}"),
-                            ));
+                            model.status_message =
+                                Some(StatusMessage::error(format!("describe: parse error: {e}")));
                         }
                     },
                     Err(e) => {
-                        model.status_message = Some(StatusMessage::error(
-                            format!("describe: read error: {e}"),
-                        ));
+                        model.status_message =
+                            Some(StatusMessage::error(format!("describe: read error: {e}")));
                     }
                 }
             } else {
-                let available: Vec<&str> =
-                    ctx.graph.components.iter().map(|c| c.name.as_str()).collect();
+                let available: Vec<&str> = ctx
+                    .graph
+                    .components
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect();
                 let suggestion = build_did_you_mean(id, &available);
                 model.status_message = Some(StatusMessage::error(format!(
                     "component '{id}' not found{suggestion}"
@@ -314,12 +254,10 @@ fn dispatch_command(
                         .collect();
                     let count = rows.len();
                     model.active_view = ActiveView::Validate(ValidateView::new(rows));
-                    model.status_message =
-                        Some(StatusMessage::info(format!("{count} finding(s)")));
+                    model.status_message = Some(StatusMessage::info(format!("{count} finding(s)")));
                 }
                 Err(e) => {
-                    model.status_message =
-                        Some(StatusMessage::error(format!("validate: {e}")));
+                    model.status_message = Some(StatusMessage::error(format!("validate: {e}")));
                 }
             }
             Task::none()
@@ -345,8 +283,7 @@ fn dispatch_command(
             Task::none()
         }
         other => {
-            model.status_message =
-                Some(StatusMessage::error(format!("unknown command: {other}")));
+            model.status_message = Some(StatusMessage::error(format!("unknown command: {other}")));
             Task::none()
         }
     }

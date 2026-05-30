@@ -18,17 +18,15 @@
 
 use std::collections::HashSet;
 
-use design_data_core::cascade::{self, specificity};
-use design_data_core::diff::display_name;
-use design_data_core::graph::{TokenGraph, TokenRecord};
+use design_data_core::cascade::resolve_property;
 use design_data_core::query;
 use design_data_core::validate;
 use tui_input::Input;
 
 use crate::app::{
-    App, ActiveView, DescribeView, DiagnosticRow, Modal, PaletteMode, QueryRow, QueryView,
-    ResolvedRow, ResolveView, StatusMessage, SubmitContext, ValidateView,
-    HISTORY_CAP, layer_str, parse_resolve_args, save_palette_history,
+    parse_resolve_args, resolve_context_with_restrictions, save_palette_history, ActiveView, App,
+    DescribeView, DiagnosticRow, Modal, PaletteMode, QueryRow, QueryView, ResolveView, ResolvedRow,
+    StatusMessage, SubmitContext, ValidateView, HISTORY_CAP,
 };
 use crate::find::FindWizardState;
 use crate::naming::NamingWizardState;
@@ -49,8 +47,7 @@ impl App {
         self.palette_history_cursor = None;
 
         // Append to history (dedupe head, cap at HISTORY_CAP).
-        if !raw.is_empty()
-            && self.palette_history.first().map(|s| s.as_str()) != Some(raw.as_str())
+        if !raw.is_empty() && self.palette_history.first().map(|s| s.as_str()) != Some(raw.as_str())
         {
             self.palette_history.insert(0, raw.clone());
             self.palette_history.truncate(HISTORY_CAP);
@@ -70,7 +67,7 @@ impl App {
                 }
                 match query::parse(&rest) {
                     Ok(expr) => {
-                        let records = query::filter(ctx.graph, &expr);
+                        let records = query::filter_with_index(ctx.graph, &ctx.token_index, &expr);
                         let rows: Vec<QueryRow> =
                             records.iter().map(|r| QueryRow::from_record(r)).collect();
                         let count = rows.len();
@@ -93,88 +90,23 @@ impl App {
                 let (prop, res_ctx) = match parse_resolve_args(&rest) {
                     Ok(v) => v,
                     Err(e) => {
-                        self.status_message =
-                            Some(StatusMessage::error(format!("resolve: {e}")));
+                        self.status_message = Some(StatusMessage::error(format!("resolve: {e}")));
                         return;
                     }
                 };
-                let candidates: Vec<TokenRecord> = ctx
-                    .graph
-                    .tokens
-                    .values()
-                    .filter(|t| {
-                        t.raw
-                            .get("name")
-                            .and_then(|v| v.as_object())
-                            .and_then(|n| n.get("property"))
-                            .and_then(|v| v.as_str())
-                            == Some(prop.as_str())
-                    })
-                    .cloned()
-                    .collect();
+                let res_ctx =
+                    resolve_context_with_restrictions(res_ctx, &ctx.mode_set_restrictions);
+                let candidates = resolve_property(ctx.graph, &prop, &res_ctx);
                 if candidates.is_empty() {
                     self.active_view = ActiveView::Resolve(ResolveView::new(prop, vec![]));
                     self.status_message = Some(StatusMessage::info("no match"));
                     return;
                 }
-                let filtered_graph = TokenGraph::from_records(candidates)
-                    .with_mode_sets(ctx.graph.mode_sets.clone());
-                let mut with_spec: Vec<(&TokenRecord, u32)> = filtered_graph
-                    .tokens
-                    .values()
-                    .map(|t| {
-                        let s = t
-                            .raw
-                            .get("name")
-                            .and_then(|v| v.as_object())
-                            .map(|n| specificity(n, &filtered_graph.mode_sets))
-                            .unwrap_or(0);
-                        (t, s)
-                    })
-                    .collect();
-                with_spec.sort_by(|(a, sa), (b, sb)| {
-                    b.layer
-                        .cmp(&a.layer)
-                        .then_with(|| sb.cmp(sa))
-                        .then_with(|| a.file.cmp(&b.file))
-                        .then_with(|| a.index.cmp(&b.index))
-                });
-                let winner = cascade::resolve(&filtered_graph, &res_ctx);
-                let rows: Vec<ResolvedRow> = with_spec
-                    .iter()
-                    .map(|(t, spec)| {
-                        let value = t
-                            .raw
-                            .get("value")
-                            .map(|v| {
-                                if v.is_string() {
-                                    v.as_str().unwrap_or("").to_string()
-                                } else {
-                                    v.to_string()
-                                }
-                            })
-                            .or_else(|| t.alias_target.clone())
-                            .unwrap_or_default();
-                        let file = t
-                            .file
-                            .file_name()
-                            .map(|f| f.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let is_winner = winner.map(|w| w.name == t.name).unwrap_or(false);
-                        ResolvedRow {
-                            name: display_name(t),
-                            value,
-                            file,
-                            layer: layer_str(t.layer).to_string(),
-                            specificity: *spec,
-                            is_winner,
-                        }
-                    })
-                    .collect();
+                let rows: Vec<ResolvedRow> =
+                    candidates.iter().map(ResolvedRow::from_candidate).collect();
                 let count = rows.len();
                 self.active_view = ActiveView::Resolve(ResolveView::new(prop, rows));
-                self.status_message =
-                    Some(StatusMessage::info(format!("{count} candidate(s)")));
+                self.status_message = Some(StatusMessage::info(format!("{count} candidate(s)")));
             }
             "describe" | "component" => {
                 if rest.is_empty() {
@@ -202,38 +134,42 @@ impl App {
                 let file_path = comp_dir.join(format!("{id}.json"));
                 if file_path.is_file() {
                     match std::fs::read_to_string(&file_path) {
-                        Ok(raw_text) => match serde_json::from_str::<serde_json::Value>(&raw_text)
-                        {
-                            Ok(doc) => match serde_json::to_string_pretty(&doc) {
-                                Ok(pretty) => {
-                                    self.active_view = ActiveView::Describe(DescribeView {
-                                        component: id.to_string(),
-                                        pretty_json: pretty,
-                                        scroll: 0,
-                                    });
-                                    self.status_message = None;
-                                }
+                        Ok(raw_text) => {
+                            match serde_json::from_str::<serde_json::Value>(&raw_text) {
+                                Ok(doc) => match serde_json::to_string_pretty(&doc) {
+                                    Ok(pretty) => {
+                                        self.active_view = ActiveView::Describe(DescribeView {
+                                            component: id.to_string(),
+                                            pretty_json: pretty,
+                                            scroll: 0,
+                                        });
+                                        self.status_message = None;
+                                    }
+                                    Err(e) => {
+                                        self.status_message = Some(StatusMessage::error(format!(
+                                            "describe: render error: {e}"
+                                        )));
+                                    }
+                                },
                                 Err(e) => {
                                     self.status_message = Some(StatusMessage::error(format!(
-                                        "describe: render error: {e}"
+                                        "describe: parse error: {e}"
                                     )));
                                 }
-                            },
-                            Err(e) => {
-                                self.status_message = Some(StatusMessage::error(format!(
-                                    "describe: parse error: {e}"
-                                )));
                             }
-                        },
+                        }
                         Err(e) => {
-                            self.status_message = Some(StatusMessage::error(format!(
-                                "describe: read error: {e}"
-                            )));
+                            self.status_message =
+                                Some(StatusMessage::error(format!("describe: read error: {e}")));
                         }
                     }
                 } else {
-                    let available: Vec<&str> =
-                        ctx.graph.components.iter().map(|c| c.name.as_str()).collect();
+                    let available: Vec<&str> = ctx
+                        .graph
+                        .components
+                        .iter()
+                        .map(|c| c.name.as_str())
+                        .collect();
                     let suggestion = if available.is_empty() {
                         String::new()
                     } else {
@@ -266,8 +202,7 @@ impl App {
                 }
             }
             "validate" => {
-                let (Some(dataset_path), Some(registry)) =
-                    (ctx.dataset_path, ctx.schema_registry)
+                let (Some(dataset_path), Some(registry)) = (ctx.dataset_path, ctx.schema_registry)
                 else {
                     self.status_message = Some(StatusMessage::error(
                         "validate: dataset or schema registry unavailable",
@@ -305,8 +240,7 @@ impl App {
                             Some(StatusMessage::info(format!("{count} finding(s)")));
                     }
                     Err(e) => {
-                        self.status_message =
-                            Some(StatusMessage::error(format!("validate: {e}")));
+                        self.status_message = Some(StatusMessage::error(format!("validate: {e}")));
                     }
                 }
             }

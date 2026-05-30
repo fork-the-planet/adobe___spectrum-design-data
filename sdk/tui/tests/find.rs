@@ -13,6 +13,7 @@ use common::{key, update_ctx};
 
 use crossterm::event::KeyCode;
 use design_data_core::graph::{Layer, TokenGraph, TokenRecord};
+use design_data_core::query::TokenIndex;
 use design_data_tui::app::{ActiveView, Modal};
 use design_data_tui::find::{FindEvent, FindScreen, FindWizardState};
 use design_data_tui::{update, Message, Model, UpdateCtx};
@@ -89,13 +90,14 @@ fn new_with_empty_intent_leaves_focus_at_property() {
 fn assemble_expr_from_property_and_variant() {
     let mut fs = FindWizardState::new();
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     for c in "background-color".chars() {
-        fs.handle_key(key(KeyCode::Char(c)), &graph);
+        fs.handle_key(key(KeyCode::Char(c)), &graph, &index);
     }
-    fs.handle_key(key(KeyCode::Tab), &graph);
-    fs.handle_key(key(KeyCode::Tab), &graph);
+    fs.handle_key(key(KeyCode::Tab), &graph, &index);
+    fs.handle_key(key(KeyCode::Tab), &graph, &index);
     for c in "accent".chars() {
-        fs.handle_key(key(KeyCode::Char(c)), &graph);
+        fs.handle_key(key(KeyCode::Char(c)), &graph, &index);
     }
     let expr = fs.assemble_expr().unwrap();
     assert_eq!(expr, "property=background-color,variant=accent");
@@ -110,11 +112,12 @@ fn assemble_expr_returns_none_when_all_fields_empty() {
 #[test]
 fn refresh_preview_populates_rows_for_structured_filter() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
     for c in "background-color".chars() {
-        fs.handle_key(key(KeyCode::Char(c)), &graph);
+        fs.handle_key(key(KeyCode::Char(c)), &graph, &index);
     }
-    fs.refresh_preview(&graph);
+    fs.refresh_preview(&graph, &index);
     assert_eq!(fs.preview_count, 2);
     assert!(fs.preview_error.is_none());
 }
@@ -122,8 +125,9 @@ fn refresh_preview_populates_rows_for_structured_filter() {
 #[test]
 fn refresh_preview_uses_suggest_when_only_intent_filled() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new_with_intent("accent background");
-    fs.refresh_preview(&graph);
+    fs.refresh_preview(&graph, &index);
     assert!(fs.preview_count > 0);
     assert!(fs.preview_rows.iter().any(|r| r.name.contains("accent")));
     assert!(fs.preview_error.is_none());
@@ -132,8 +136,9 @@ fn refresh_preview_uses_suggest_when_only_intent_filled() {
 #[test]
 fn refresh_preview_is_empty_when_nothing_filled() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
-    fs.refresh_preview(&graph);
+    fs.refresh_preview(&graph, &index);
     assert_eq!(fs.preview_count, 0);
     assert!(fs.preview_rows.is_empty());
     assert!(fs.preview_error.is_none());
@@ -142,8 +147,9 @@ fn refresh_preview_is_empty_when_nothing_filled() {
 #[test]
 fn enter_on_filters_advances_to_preview() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
-    let event = fs.handle_key(key(KeyCode::Enter), &graph);
+    let event = fs.handle_key(key(KeyCode::Enter), &graph, &index);
     assert!(matches!(event, FindEvent::Continue));
     assert_eq!(fs.screen, FindScreen::Preview);
 }
@@ -151,25 +157,27 @@ fn enter_on_filters_advances_to_preview() {
 #[test]
 fn enter_on_preview_emits_open_results() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
     for c in "background-color".chars() {
-        fs.handle_key(key(KeyCode::Char(c)), &graph);
+        fs.handle_key(key(KeyCode::Char(c)), &graph, &index);
     }
-    fs.handle_key(key(KeyCode::Enter), &graph);
+    fs.handle_key(key(KeyCode::Enter), &graph, &index);
     assert_eq!(fs.screen, FindScreen::Preview);
-    let event = fs.handle_key(key(KeyCode::Enter), &graph);
+    let event = fs.handle_key(key(KeyCode::Enter), &graph, &index);
     assert!(matches!(event, FindEvent::OpenResults(_)));
 }
 
 #[test]
 fn open_results_view_has_correct_row_count() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
     for c in "background-color".chars() {
-        fs.handle_key(key(KeyCode::Char(c)), &graph);
+        fs.handle_key(key(KeyCode::Char(c)), &graph, &index);
     }
-    fs.handle_key(key(KeyCode::Enter), &graph);
-    let event = fs.handle_key(key(KeyCode::Enter), &graph);
+    fs.handle_key(key(KeyCode::Enter), &graph, &index);
+    let event = fs.handle_key(key(KeyCode::Enter), &graph, &index);
     if let FindEvent::OpenResults(view) = event {
         assert!(view.rows.len() >= 1);
         assert_eq!(view.expr_text, "property=background-color");
@@ -181,9 +189,10 @@ fn open_results_view_has_correct_row_count() {
 #[test]
 fn e_on_preview_goes_back_to_filters() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
-    fs.handle_key(key(KeyCode::Enter), &graph);
-    let event = fs.handle_key(key(KeyCode::Char('e')), &graph);
+    fs.handle_key(key(KeyCode::Enter), &graph, &index);
+    let event = fs.handle_key(key(KeyCode::Char('e')), &graph, &index);
     assert!(matches!(event, FindEvent::Continue));
     assert_eq!(fs.screen, FindScreen::Filters);
 }
@@ -191,51 +200,56 @@ fn e_on_preview_goes_back_to_filters() {
 #[test]
 fn esc_cancels_on_filters_screen() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
-    let event = fs.handle_key(key(KeyCode::Esc), &graph);
+    let event = fs.handle_key(key(KeyCode::Esc), &graph, &index);
     assert!(matches!(event, FindEvent::Cancel));
 }
 
 #[test]
 fn esc_cancels_on_preview_screen() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
-    fs.handle_key(key(KeyCode::Enter), &graph);
-    let event = fs.handle_key(key(KeyCode::Esc), &graph);
+    fs.handle_key(key(KeyCode::Enter), &graph, &index);
+    let event = fs.handle_key(key(KeyCode::Esc), &graph, &index);
     assert!(matches!(event, FindEvent::Cancel));
 }
 
 #[test]
 fn q_cancels_on_preview_screen() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
-    fs.handle_key(key(KeyCode::Enter), &graph);
-    let event = fs.handle_key(key(KeyCode::Char('q')), &graph);
+    fs.handle_key(key(KeyCode::Enter), &graph, &index);
+    let event = fs.handle_key(key(KeyCode::Char('q')), &graph, &index);
     assert!(matches!(event, FindEvent::Cancel));
 }
 
 #[test]
 fn tab_cycles_through_fields() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
     assert_eq!(fs.focused_field, 0);
-    fs.handle_key(key(KeyCode::Tab), &graph);
+    fs.handle_key(key(KeyCode::Tab), &graph, &index);
     assert_eq!(fs.focused_field, 1);
-    fs.handle_key(key(KeyCode::Tab), &graph);
+    fs.handle_key(key(KeyCode::Tab), &graph, &index);
     assert_eq!(fs.focused_field, 2);
-    fs.handle_key(key(KeyCode::BackTab), &graph);
+    fs.handle_key(key(KeyCode::BackTab), &graph, &index);
     assert_eq!(fs.focused_field, 1);
 }
 
 #[test]
 fn tab_wraps_around_from_last_to_first_field() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
     for _ in 0..4 {
-        fs.handle_key(key(KeyCode::Tab), &graph);
+        fs.handle_key(key(KeyCode::Tab), &graph, &index);
     }
     assert_eq!(fs.focused_field, 4);
-    fs.handle_key(key(KeyCode::Tab), &graph);
+    fs.handle_key(key(KeyCode::Tab), &graph, &index);
     assert_eq!(fs.focused_field, 0);
 }
 
@@ -243,19 +257,24 @@ fn tab_wraps_around_from_last_to_first_field() {
 fn property_suggestions_filter_by_typed_prefix() {
     let mut fs = FindWizardState::new();
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     for c in "background".chars() {
-        fs.handle_key(key(KeyCode::Char(c)), &graph);
+        fs.handle_key(key(KeyCode::Char(c)), &graph, &index);
     }
     assert!(!fs.property_suggestions.is_empty());
-    assert!(fs.property_suggestions.iter().all(|s| s.contains("background")));
+    assert!(fs
+        .property_suggestions
+        .iter()
+        .all(|s| s.contains("background")));
 }
 
 #[test]
 fn up_down_navigate_property_suggestions() {
     let mut fs = FindWizardState::new();
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     for c in "color".chars() {
-        fs.handle_key(key(KeyCode::Char(c)), &graph);
+        fs.handle_key(key(KeyCode::Char(c)), &graph, &index);
     }
     assert!(
         fs.property_suggestions.len() > 1,
@@ -263,19 +282,23 @@ fn up_down_navigate_property_suggestions() {
         fs.property_suggestions.len()
     );
     let initial = fs.selected_property_suggestion;
-    fs.handle_key(key(KeyCode::Down), &graph);
+    fs.handle_key(key(KeyCode::Down), &graph, &index);
     assert_eq!(fs.selected_property_suggestion, initial + 1);
-    fs.handle_key(key(KeyCode::Up), &graph);
+    fs.handle_key(key(KeyCode::Up), &graph, &index);
     assert_eq!(fs.selected_property_suggestion, initial);
 }
 
 #[test]
 fn refresh_preview_sets_error_on_invalid_expression() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
     fs.property = tui_input::Input::from("foo,bar".to_string());
-    fs.refresh_preview(&graph);
-    assert!(fs.preview_error.is_some(), "expected parse error for condition missing operator");
+    fs.refresh_preview(&graph, &index);
+    assert!(
+        fs.preview_error.is_some(),
+        "expected parse error for condition missing operator"
+    );
     assert_eq!(fs.preview_count, 0);
     assert!(fs.preview_rows.is_empty());
 }
@@ -283,32 +306,42 @@ fn refresh_preview_sets_error_on_invalid_expression() {
 #[test]
 fn assemble_expr_round_trips_through_query_parse_and_finds_rows() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
     for c in "background-color".chars() {
-        fs.handle_key(key(KeyCode::Char(c)), &graph);
+        fs.handle_key(key(KeyCode::Char(c)), &graph, &index);
     }
-    fs.refresh_preview(&graph);
-    assert!(fs.preview_error.is_none(), "parse error: {:?}", fs.preview_error);
-    assert!(fs.preview_count >= 1, "expected at least one match for property=background-color");
+    fs.refresh_preview(&graph, &index);
+    assert!(
+        fs.preview_error.is_none(),
+        "parse error: {:?}",
+        fs.preview_error
+    );
+    assert!(
+        fs.preview_count >= 1,
+        "expected at least one match for property=background-color"
+    );
 }
 
 #[test]
 fn backtab_wraps_from_first_to_last_field() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new();
     assert_eq!(fs.focused_field, 0);
-    fs.handle_key(key(KeyCode::BackTab), &graph);
+    fs.handle_key(key(KeyCode::BackTab), &graph, &index);
     assert_eq!(fs.focused_field, FindWizardState::FIELD_COUNT - 1);
 }
 
 #[test]
 fn intent_only_flow_emits_open_results_with_intent_as_expr_text() {
     let graph = make_find_graph();
+    let index = TokenIndex::build(&graph);
     let mut fs = FindWizardState::new_with_intent("accent background");
-    fs.handle_key(key(KeyCode::Enter), &graph);
+    fs.handle_key(key(KeyCode::Enter), &graph, &index);
     assert_eq!(fs.screen, FindScreen::Preview);
     assert!(fs.preview_count > 0);
-    let event = fs.handle_key(key(KeyCode::Enter), &graph);
+    let event = fs.handle_key(key(KeyCode::Enter), &graph, &index);
     if let FindEvent::OpenResults(view) = event {
         assert_eq!(view.expr_text, "accent background");
         assert!(!view.rows.is_empty());
@@ -401,8 +434,15 @@ fn accepting_preview_opens_query_view_and_closes_modal() {
 
     assert!(!model.is_modal_open());
     assert!(matches!(model.active_view, ActiveView::Query(_)));
-    let msg = model.status_message.as_ref().map(|m| m.text.as_str()).unwrap_or("");
-    assert!(msg.contains("matched"), "expected 'matched' in status: {msg}");
+    let msg = model
+        .status_message
+        .as_ref()
+        .map(|m| m.text.as_str())
+        .unwrap_or("");
+    assert!(
+        msg.contains("matched"),
+        "expected 'matched' in status: {msg}"
+    );
 }
 
 #[test]

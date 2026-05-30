@@ -14,6 +14,7 @@
 //! Tests that exercise the real `write_token` path load `SchemaRegistry` from
 //! `packages/tokens/schemas` (relative to the repo root via `CARGO_MANIFEST_DIR`).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 mod common;
@@ -21,6 +22,7 @@ use common::key;
 
 use crossterm::event::KeyCode;
 use design_data_core::graph::{Layer, TokenGraph, TokenRecord};
+use design_data_core::query::TokenIndex;
 use design_data_core::schema::SchemaRegistry;
 use design_data_tui::wizard::{ValueKind, ValueRow, WizardCtx, WizardState};
 use design_data_tui::{update, Message, Model, UpdateCtx};
@@ -82,17 +84,23 @@ fn submit_without_allow_write_does_not_create_file() {
     let tmpdir = tempfile::TempDir::new().expect("tempdir");
     let ctx = UpdateCtx {
         graph: &graph,
+        token_index: TokenIndex::build(&graph),
         dataset_path: Some(tmpdir.path()),
         schema_registry: Some(&registry),
         components_dir: None,
         mode_sets_dir: None,
+        mode_set_restrictions: HashMap::new(),
         allow_write: false,
     };
     let mut model = Model::new();
-    update(&mut model, Message::PaletteSubmit("new background-color".into()), &ctx);
+    update(
+        &mut model,
+        Message::PaletteSubmit("new background-color".into()),
+        &ctx,
+    );
 
     update(&mut model, Message::Key(key(KeyCode::Enter)), &ctx); // → Screen 2
-    update(&mut model, Message::Key(key(KeyCode::Tab)), &ctx);   // focus property
+    update(&mut model, Message::Key(key(KeyCode::Tab)), &ctx); // focus property
     for c in "background-color".chars() {
         update(&mut model, Message::Key(key(KeyCode::Char(c))), &ctx);
     }
@@ -103,17 +111,30 @@ fn submit_without_allow_write_does_not_create_file() {
     }
     let task = update(&mut model, Message::Key(key(KeyCode::Enter)), &ctx);
 
-    assert!(!model.is_modal_open(), "modal should close without --allow-write");
-    assert!(task.is_cmd(), "submit without allow_write should return Task::Cmd (draft clear)");
+    assert!(
+        !model.is_modal_open(),
+        "modal should close without --allow-write"
+    );
+    assert!(
+        task.is_cmd(),
+        "submit without allow_write should return Task::Cmd (draft clear)"
+    );
 
-    let msg = model.status_message.as_ref().map(|m| m.text.as_str()).unwrap_or("");
+    let msg = model
+        .status_message
+        .as_ref()
+        .map(|m| m.text.as_str())
+        .unwrap_or("");
     assert!(
         msg.contains("allow-write") || msg.contains("preview"),
         "status should mention --allow-write: {msg}"
     );
 
     let foundation = tmpdir.path().join("foundation.json");
-    assert!(!foundation.exists(), "foundation.json must NOT be created without --allow-write");
+    assert!(
+        !foundation.exists(),
+        "foundation.json must NOT be created without --allow-write"
+    );
 }
 
 #[test]
@@ -123,6 +144,7 @@ fn submit_with_allow_write_creates_token_file() {
     let tmpdir = tempfile::TempDir::new().expect("tempdir");
     let ctx = WizardCtx {
         graph: &graph,
+        token_index: TokenIndex::build(&graph),
         dataset_path: Some(tmpdir.path()),
         schema_registry: Some(&registry),
         allow_write: true,
@@ -131,11 +153,17 @@ fn submit_with_allow_write_creates_token_file() {
     // Build wizard state directly: property=background-color, literal value.
     let ws = wizard_at_confirm_literal("background-color", "rgb(2, 100, 220)", COLOR_SCHEMA);
     let written_path = ws.perform_write(&ctx).expect("write should succeed");
-    assert!(written_path.ends_with("foundation.json"), "should write to foundation.json: {written_path}");
+    assert!(
+        written_path.ends_with("foundation.json"),
+        "should write to foundation.json: {written_path}"
+    );
 
     // foundation.json must now exist and contain the new key.
     let foundation = tmpdir.path().join("foundation.json");
-    assert!(foundation.exists(), "foundation.json should be created by write_token");
+    assert!(
+        foundation.exists(),
+        "foundation.json should be created by write_token"
+    );
 
     let content = std::fs::read_to_string(&foundation).expect("read foundation.json");
     let doc: serde_json::Value = serde_json::from_str(&content).expect("parse foundation.json");
@@ -161,6 +189,7 @@ fn submit_with_allow_write_updates_product_context() {
 
     let ctx = WizardCtx {
         graph: &graph,
+        token_index: TokenIndex::build(&graph),
         dataset_path: Some(tmpdir.path()),
         schema_registry: Some(&registry),
         allow_write: true,
@@ -176,7 +205,10 @@ fn submit_with_allow_write_updates_product_context() {
         .and_then(|e| e.get("tokens"))
         .and_then(|t| t.as_array())
         .expect("extensions.tokens array");
-    assert!(!tokens.is_empty(), "product-context.json should have an entry after write");
+    assert!(
+        !tokens.is_empty(),
+        "product-context.json should have an entry after write"
+    );
 }
 
 #[test]
@@ -186,6 +218,7 @@ fn submit_with_allow_write_missing_schema_returns_error() {
     let tmpdir = tempfile::TempDir::new().expect("tempdir");
     let ctx = WizardCtx {
         graph: &graph,
+        token_index: TokenIndex::build(&graph),
         dataset_path: Some(tmpdir.path()),
         schema_registry: Some(&registry),
         allow_write: true,
@@ -212,7 +245,10 @@ fn submit_with_allow_write_missing_schema_returns_error() {
     );
 
     // No files written.
-    assert!(!tmpdir.path().join("foundation.json").exists(), "no file on failure");
+    assert!(
+        !tmpdir.path().join("foundation.json").exists(),
+        "no file on failure"
+    );
 }
 
 #[test]
@@ -249,6 +285,7 @@ fn is_override_detected_when_token_name_exists_in_graph() {
     let tmpdir = tempfile::TempDir::new().expect("tempdir");
     let ctx = WizardCtx {
         graph: &graph,
+        token_index: TokenIndex::build(&graph),
         dataset_path: Some(tmpdir.path()),
         schema_registry: Some(&registry),
         allow_write: true,
@@ -262,7 +299,10 @@ fn is_override_detected_when_token_name_exists_in_graph() {
     assert!(foundation.exists(), "foundation.json should be created");
     let doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&foundation).unwrap()).unwrap();
-    assert!(doc.get("background-color").is_some(), "token key should be present");
+    assert!(
+        doc.get("background-color").is_some(),
+        "token key should be present"
+    );
 }
 
 #[test]
@@ -285,6 +325,7 @@ fn resolve_target_file_foundation_maps_to_foundation_json() {
 
     let ctx = WizardCtx {
         graph: &graph,
+        token_index: TokenIndex::build(&graph),
         dataset_path: Some(tmpdir.path()),
         schema_registry: Some(&registry),
         allow_write: true,

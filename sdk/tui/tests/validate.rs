@@ -13,6 +13,7 @@ use common::key;
 
 use crossterm::event::KeyCode;
 use design_data_core::graph::TokenGraph;
+use design_data_core::query::TokenIndex;
 use design_data_core::schema::SchemaRegistry;
 use design_data_tui::app::ActiveView;
 use design_data_tui::{update, Message, Model, UpdateCtx};
@@ -53,6 +54,8 @@ fn validate_ctx<'a>(
         components_dir: None,
         schema_registry: Some(registry),
         mode_sets_dir: None,
+        token_index: TokenIndex::build(graph),
+        mode_set_restrictions: std::collections::HashMap::new(),
         allow_write: false,
     }
 }
@@ -71,12 +74,18 @@ fn validate_without_registry_sets_error_status() {
         components_dir: None,
         schema_registry: None,
         mode_sets_dir: None,
+        token_index: TokenIndex::build(&graph),
+        mode_set_restrictions: std::collections::HashMap::new(),
         allow_write: false,
     };
     let mut model = Model::new();
     update(&mut model, Message::PaletteSubmit("validate".into()), &ctx);
     assert!(matches!(model.active_view, ActiveView::Empty));
-    let msg = model.status_message.as_ref().map(|m| m.text.as_str()).unwrap_or("");
+    let msg = model
+        .status_message
+        .as_ref()
+        .map(|m| m.text.as_str())
+        .unwrap_or("");
     assert!(
         msg.contains("requires") || msg.contains("error"),
         "expected error: {msg}"
@@ -85,18 +94,25 @@ fn validate_without_registry_sets_error_status() {
 
 #[test]
 fn validate_good_tokens_produces_validate_view() {
-    let Some(registry) = try_load_registry() else { return };
+    let Some(registry) = try_load_registry() else {
+        return;
+    };
     let tokens_dir = tokens_good_dir();
     let graph = TokenGraph::from_json_dir(&tokens_dir).expect("graph load");
     let ctx = validate_ctx(&graph, &tokens_dir, &registry);
     let mut model = Model::new();
     submit_validate(&mut model, &ctx);
-    assert!(matches!(model.active_view, ActiveView::Validate(_)), "expected Validate view");
+    assert!(
+        matches!(model.active_view, ActiveView::Validate(_)),
+        "expected Validate view"
+    );
 }
 
 #[test]
 fn validate_good_tokens_zero_findings() {
-    let Some(registry) = try_load_registry() else { return };
+    let Some(registry) = try_load_registry() else {
+        return;
+    };
     let tokens_dir = tokens_good_dir();
     let graph = TokenGraph::from_json_dir(&tokens_dir).expect("graph load");
     let ctx = validate_ctx(&graph, &tokens_dir, &registry);
@@ -111,14 +127,19 @@ fn validate_good_tokens_zero_findings() {
 
 #[test]
 fn validate_bad_tokens_produces_findings() {
-    let Some(registry) = try_load_registry() else { return };
+    let Some(registry) = try_load_registry() else {
+        return;
+    };
     let tokens_dir = tokens_bad_dir();
     let graph = TokenGraph::from_json_dir(&tokens_dir).expect("graph load");
     let ctx = validate_ctx(&graph, &tokens_dir, &registry);
     let mut model = Model::new();
     submit_validate(&mut model, &ctx);
     if let ActiveView::Validate(ref vv) = model.active_view {
-        assert!(vv.rows.len() >= 1, "expected at least 1 finding for bad tokens");
+        assert!(
+            vv.rows.len() >= 1,
+            "expected at least 1 finding for bad tokens"
+        );
     } else {
         panic!("expected Validate view");
     }
@@ -126,14 +147,18 @@ fn validate_bad_tokens_produces_findings() {
 
 #[test]
 fn validate_j_k_navigate() {
-    let Some(registry) = try_load_registry() else { return };
+    let Some(registry) = try_load_registry() else {
+        return;
+    };
     let tokens_dir = tokens_bad_dir();
     let graph = TokenGraph::from_json_dir(&tokens_dir).expect("graph load");
     let ctx = validate_ctx(&graph, &tokens_dir, &registry);
     let mut model = Model::new();
     submit_validate(&mut model, &ctx);
     if let ActiveView::Validate(ref vv) = model.active_view {
-        if vv.rows.is_empty() { return; }
+        if vv.rows.is_empty() {
+            return;
+        }
     }
     update(&mut model, Message::Key(key(KeyCode::Char('j'))), &ctx);
     if let ActiveView::Validate(ref vv) = model.active_view {
@@ -149,23 +174,35 @@ fn validate_j_k_navigate() {
 
 #[test]
 fn validate_y_returns_clipboard_task() {
-    let Some(registry) = try_load_registry() else { return };
+    let Some(registry) = try_load_registry() else {
+        return;
+    };
     let tokens_dir = tokens_bad_dir();
     let graph = TokenGraph::from_json_dir(&tokens_dir).expect("graph load");
     let ctx = validate_ctx(&graph, &tokens_dir, &registry);
     let mut model = Model::new();
     submit_validate(&mut model, &ctx);
     if let ActiveView::Validate(ref vv) = model.active_view {
-        if vv.rows.is_empty() { return; }
+        if vv.rows.is_empty() {
+            return;
+        }
     }
     let task = update(&mut model, Message::Key(key(KeyCode::Char('y'))), &ctx);
-    assert!(task.is_cmd(), "'y' should return Task::Cmd for clipboard write");
-    assert!(model.pending_yank.is_none(), "pending_yank should not be set");
+    assert!(
+        task.is_cmd(),
+        "'y' should return Task::Cmd for clipboard write"
+    );
+    assert!(
+        model.pending_yank.is_none(),
+        "pending_yank should not be set"
+    );
 }
 
 #[test]
 fn esc_from_validate_view_returns_to_empty() {
-    let Some(registry) = try_load_registry() else { return };
+    let Some(registry) = try_load_registry() else {
+        return;
+    };
     let tokens_dir = tokens_good_dir();
     let graph = TokenGraph::from_json_dir(&tokens_dir).expect("graph load");
     let ctx = validate_ctx(&graph, &tokens_dir, &registry);

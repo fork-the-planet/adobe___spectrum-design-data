@@ -19,24 +19,26 @@ mod format;
 use std::collections::HashSet;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
-use design_data_tui::{LaunchOptions, ThemeChoice};
-use design_data_core::cascade::{resolve, ResolutionContext};
-use design_data_core::data_source::{self, CliPathOverrides};
+use design_data_core::cache;
+use design_data_core::cascade::{resolve_property, ResolutionContext};
 use design_data_core::compat::{
     load_snapshot, snapshot_matches, write_snapshot, ValidationSnapshot,
 };
+use design_data_core::data_source::{self, CliPathOverrides};
 use design_data_core::diff;
 use design_data_core::diff::display_name;
 use design_data_core::figma;
 use design_data_core::graph::TokenGraph;
 use design_data_core::legacy;
+use design_data_core::manifest;
 use design_data_core::migrate;
 use design_data_core::naming::NamingExceptionsFile;
 use design_data_core::query;
 use design_data_core::schema::SchemaRegistry;
 use design_data_core::suggest;
 use design_data_core::validate;
-use design_data_core::write::{WriteTokenInput, write_token};
+use design_data_core::write::{write_token, WriteTokenInput};
+use design_data_tui::{LaunchOptions, ThemeChoice};
 use miette::{IntoDiagnostic, WrapErr};
 
 const SPEC_VERSION: &str = "1.0.0-draft";
@@ -46,9 +48,13 @@ const SPEC_VERSION: &str = "1.0.0-draft";
 /// Run with no arguments to launch the interactive TUI. Pass a subcommand for
 /// non-interactive use.
 #[derive(Parser)]
-#[command(name = "design-data", version, about,
-          args_conflicts_with_subcommands = true,
-          subcommand_negates_reqs = true)]
+#[command(
+    name = "design-data",
+    version,
+    about,
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -227,7 +233,12 @@ enum Commands {
     /// Create or update a product-context.json document for a product-layer working copy
     Write {
         /// Path to the product context JSON file to create or update
-        #[arg(short, long, value_name = "FILE", default_value = "product-context.json")]
+        #[arg(
+            short,
+            long,
+            value_name = "FILE",
+            default_value = "product-context.json"
+        )]
         output: PathBuf,
         /// Why this product-layer working copy exists (recorded in the document's rationale field)
         #[arg(short, long, value_name = "TEXT")]
@@ -260,6 +271,19 @@ enum Commands {
         /// Path to schemas directory (default: packages/tokens/schemas relative to target)
         #[arg(long, value_name = "DIR")]
         schema_path: Option<PathBuf>,
+    },
+    /// Build the derived embedded-database cache as a portable .redb asset
+    ///
+    /// Emits a single-file cache from the canonical JSON. Useful for shipping a
+    /// prebuilt index to WASM web tools, which open it read-only in memory.
+    #[command(name = "cache-build")]
+    CacheBuild {
+        /// Token dataset directory (default: resolved canonical dataset)
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Output .redb file path
+        #[arg(short, long, value_name = "FILE", default_value = "index.redb")]
+        output: PathBuf,
     },
     /// Manage token authoring sessions (MCP parity, RFC #973 Q4)
     #[command(name = "authoring-session")]
@@ -397,30 +421,32 @@ fn run_resolve(
     format: OutputFormat,
 ) -> miette::Result<ExitCode> {
     // Build resolution context from flags.
-    let mut ctx = ResolutionContext::new();
+    let mut resolve_ctx = ResolutionContext::new();
     if let Some(m) = color_scheme {
-        ctx = ctx.with("colorScheme", m);
+        resolve_ctx = resolve_ctx.with("colorScheme", m);
     }
     if let Some(m) = scale {
-        ctx = ctx.with("scale", m);
+        resolve_ctx = resolve_ctx.with("scale", m);
     }
     if let Some(m) = contrast {
-        ctx = ctx.with("contrast", m);
+        resolve_ctx = resolve_ctx.with("contrast", m);
     }
-    // A property filter: only consider tokens whose name.property matches.
-    ctx = ctx.with("__property_filter__", property.to_string());
 
-    // Load token graph.
-    let mut graph = TokenGraph::from_json_dir(path)
+    // Load token graph (via the embedded-database cache when fresh).
+    let mut graph = TokenGraph::open_cached(path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to load tokens from {}", path.display()))?;
 
     // Load mode sets from spec catalog.
     let cwd = std::env::current_dir().into_diagnostic()?;
-    let resolved = data_source::resolve(&cwd, &CliPathOverrides {
-        mode_sets: mode_sets_path,
-        ..Default::default()
-    }).into_diagnostic()?;
+    let resolved = data_source::resolve(
+        &cwd,
+        &CliPathOverrides {
+            mode_sets: mode_sets_path,
+            ..Default::default()
+        },
+    )
+    .into_diagnostic()?;
     let ms_dir = resolved.mode_sets.clone();
     if let Some(dir) = ms_dir {
         if dir.is_dir() {
@@ -433,52 +459,28 @@ fn run_resolve(
 
     // Apply a configured platform manifest (Foundation→Platform cascade): filter the
     // token set, layer in overrides/extensions, and capture mode-set restrictions.
-    let restrictions = apply_configured_manifest(&mut graph, &resolved)?;
+    let restrictions = manifest::apply_configured(&mut graph, &resolved)
+        .into_diagnostic()
+        .wrap_err("failed to apply platform manifest cascade")?;
 
-    // Build a property-filtered context (remove the internal marker).
-    let mut resolve_ctx = ResolutionContext::new();
-    for (k, v) in &ctx.mode_sets {
-        if k != "__property_filter__" {
-            resolve_ctx = resolve_ctx.with(k.clone(), v.clone());
-        }
-    }
     for (mode_set, allowed) in &restrictions {
         resolve_ctx = resolve_ctx.with_restriction(mode_set.clone(), allowed.clone());
     }
 
-    // Filter graph to tokens matching the requested property.
-    let property_filter = property.to_string();
-    let candidates: Vec<_> = graph
-        .tokens
-        .values()
-        .filter(|t| {
-            t.raw
-                .get("name")
-                .and_then(|v| v.as_object())
-                .and_then(|n| n.get("property"))
-                .and_then(|v| v.as_str())
-                == Some(property_filter.as_str())
-        })
-        .collect();
+    let candidates = resolve_property(&graph, property, &resolve_ctx);
 
     if candidates.is_empty() {
         eprintln!("No tokens found with property: {property}");
         return Ok(ExitCode::from(1));
     }
 
-    // Build a temporary graph with only the filtered tokens for resolution.
-    // Preserve full records (and their cascade `layer`) so Platform-layer
-    // manifest overrides correctly win over Foundation tokens.
-    let filtered_records: Vec<_> = candidates.iter().map(|t| (*t).clone()).collect();
-    let filtered_graph =
-        TokenGraph::from_records(filtered_records).with_mode_sets(graph.mode_sets.clone());
-
-    match resolve(&filtered_graph, &resolve_ctx) {
+    match candidates.iter().find(|c| c.is_winner) {
         None => {
             eprintln!("No matching token for property '{property}' in given context");
             Ok(ExitCode::from(1))
         }
         Some(winner) => {
+            let winner = &winner.record;
             match format {
                 OutputFormat::Json => {
                     println!(
@@ -520,13 +522,17 @@ fn run_validate(path: &Path, opts: ValidateOpts) -> miette::Result<ExitCode> {
         miette::bail!("validation engine not ready");
     }
     let cwd = std::env::current_dir().into_diagnostic()?;
-    let resolved = data_source::resolve(&cwd, &CliPathOverrides {
-        schema_root: opts.schema_path,
-        exceptions: opts.exceptions_path,
-        mode_sets: opts.mode_sets_path,
-        components: opts.components_path,
-        ..Default::default()
-    }).into_diagnostic()?;
+    let resolved = data_source::resolve(
+        &cwd,
+        &CliPathOverrides {
+            schema_root: opts.schema_path,
+            exceptions: opts.exceptions_path,
+            mode_sets: opts.mode_sets_path,
+            components: opts.components_path,
+            ..Default::default()
+        },
+    )
+    .into_diagnostic()?;
 
     let schema_root = resolved.schemas_root;
     let registry = SchemaRegistry::load_legacy_token_schemas(&schema_root)
@@ -570,12 +576,17 @@ fn run_migrate_verify(
     exceptions_path: Option<PathBuf>,
 ) -> miette::Result<ExitCode> {
     let cwd = std::env::current_dir().into_diagnostic()?;
-    let resolved = data_source::resolve(&cwd, &CliPathOverrides {
-        schema_root: schema_path,
-        exceptions: exceptions_path,
-        ..Default::default()
-    }).into_diagnostic()?;
-    let registry = SchemaRegistry::load_legacy_token_schemas(&resolved.schemas_root).into_diagnostic()?;
+    let resolved = data_source::resolve(
+        &cwd,
+        &CliPathOverrides {
+            schema_root: schema_path,
+            exceptions: exceptions_path,
+            ..Default::default()
+        },
+    )
+    .into_diagnostic()?;
+    let registry =
+        SchemaRegistry::load_legacy_token_schemas(&resolved.schemas_root).into_diagnostic()?;
     let exceptions = load_exceptions(resolved.exceptions.as_deref())?;
     let report =
         validate::validate_all_with_exceptions(path, &registry, &exceptions).into_diagnostic()?;
@@ -670,12 +681,17 @@ fn run_migrate_snapshot(
     exceptions_path: Option<PathBuf>,
 ) -> miette::Result<ExitCode> {
     let cwd = std::env::current_dir().into_diagnostic()?;
-    let resolved = data_source::resolve(&cwd, &CliPathOverrides {
-        schema_root: schema_path,
-        exceptions: exceptions_path,
-        ..Default::default()
-    }).into_diagnostic()?;
-    let registry = SchemaRegistry::load_legacy_token_schemas(&resolved.schemas_root).into_diagnostic()?;
+    let resolved = data_source::resolve(
+        &cwd,
+        &CliPathOverrides {
+            schema_root: schema_path,
+            exceptions: exceptions_path,
+            ..Default::default()
+        },
+    )
+    .into_diagnostic()?;
+    let registry =
+        SchemaRegistry::load_legacy_token_schemas(&resolved.schemas_root).into_diagnostic()?;
     let exceptions = load_exceptions(resolved.exceptions.as_deref())?;
     let report =
         validate::validate_all_with_exceptions(path, &registry, &exceptions).into_diagnostic()?;
@@ -691,10 +707,10 @@ fn run_diff(
     format: DiffFormat,
     filter_expr: Option<&str>,
 ) -> miette::Result<ExitCode> {
-    let old_graph = TokenGraph::from_json_dir(old_path)
+    let old_graph = TokenGraph::open_cached(old_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to load old tokens from {}", old_path.display()))?;
-    let new_graph = TokenGraph::from_json_dir(new_path)
+    let new_graph = TokenGraph::open_cached(new_path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to load new tokens from {}", new_path.display()))?;
 
@@ -747,77 +763,33 @@ fn run_diff(
     }
 }
 
-/// Locate the spec's `manifest.schema.json` by walking up from the token schemas
-/// directory to the repo root. Returns `None` when not found (e.g. outside a repo).
-fn locate_manifest_schema(schemas_root: &Path) -> Option<PathBuf> {
-    schemas_root.ancestors().find_map(|p| {
-        let candidate = p.join("packages/design-data-spec/schemas/manifest.schema.json");
-        candidate.is_file().then_some(candidate)
-    })
-}
-
-/// Apply the Layer 2 platform manifest declared in `.design-data.toml`
-/// (`[source].manifest`) to `graph`, returning the mode-set restrictions to feed
-/// into a [`ResolutionContext`]. A no-op (empty map) when no manifest is configured.
-///
-/// When the spec's `manifest.schema.json` is locatable, the manifest is first
-/// validated (Layer 1); schema violations abort with an error.
-fn apply_configured_manifest(
-    graph: &mut TokenGraph,
-    resolved: &data_source::ResolvedData,
-) -> miette::Result<std::collections::HashMap<String, Vec<String>>> {
-    let Some(manifest_path) = resolved.platform_manifest.as_ref() else {
-        return Ok(std::collections::HashMap::new());
-    };
-    let text = std::fs::read_to_string(manifest_path)
-        .into_diagnostic()
-        .wrap_err_with(|| format!("failed to read platform manifest {}", manifest_path.display()))?;
-    let manifest: serde_json::Value = serde_json::from_str(&text)
-        .into_diagnostic()
-        .wrap_err_with(|| {
-            format!("failed to parse platform manifest {}", manifest_path.display())
-        })?;
-
-    if let Some(schema_path) = locate_manifest_schema(&resolved.schemas_root) {
-        let errors = SchemaRegistry::validate_manifest(&manifest, &schema_path)
-            .into_diagnostic()
-            .wrap_err("failed to validate platform manifest against manifest.schema.json")?;
-        if !errors.is_empty() {
-            return Err(miette::miette!(
-                "platform manifest {} failed Layer 1 schema validation:\n  {}",
-                manifest_path.display(),
-                errors.join("\n  ")
-            ));
-        }
-    }
-
-    let outcome = graph
-        .apply_platform_manifest(&manifest)
-        .into_diagnostic()
-        .wrap_err("failed to apply platform manifest cascade")?;
-    Ok(outcome.mode_set_restrictions)
-}
-
 fn run_query(
     path: &Path,
     filter_expr: &str,
     format: OutputFormat,
     count_only: bool,
 ) -> miette::Result<ExitCode> {
-    let mut graph = TokenGraph::from_json_dir(path)
+    let cwd = std::env::current_dir().into_diagnostic()?;
+    let resolved = data_source::resolve(&cwd, &CliPathOverrides::default()).into_diagnostic()?;
+
+    let (mut graph, mut index) = TokenGraph::open_cached_with_index(path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to load tokens from {}", path.display()))?;
 
     // Apply a configured platform manifest (filters/overrides/extensions) before querying.
-    let cwd = std::env::current_dir().into_diagnostic()?;
-    let resolved = data_source::resolve(&cwd, &CliPathOverrides::default()).into_diagnostic()?;
-    apply_configured_manifest(&mut graph, &resolved)?;
+    manifest::apply_configured(&mut graph, &resolved)
+        .into_diagnostic()
+        .wrap_err("failed to apply platform manifest cascade")?;
+    // Manifest overlays change the token set — rebuild the index when one is configured.
+    if resolved.platform_manifest.is_some() {
+        index = query::TokenIndex::build(&graph);
+    }
 
     let expr = query::parse(filter_expr)
         .into_diagnostic()
         .wrap_err("failed to parse filter expression")?;
 
-    let results = query::filter(&graph, &expr);
+    let results = query::filter_with_index(&graph, &index, &expr);
 
     if count_only {
         println!("{}", results.len());
@@ -1019,18 +991,22 @@ fn run_primer(
     mode_sets_dir: Option<PathBuf>,
 ) -> miette::Result<ExitCode> {
     let cwd = std::env::current_dir().into_diagnostic()?;
-    let resolved = data_source::resolve(&cwd, &CliPathOverrides {
-        tokens_root: explicit_path.map(|p| p.to_path_buf()),
-        mode_sets: mode_sets_dir,
-        components: components_dir,
-        fields: fields_dir,
-        ..Default::default()
-    }).into_diagnostic()?;
+    let resolved = data_source::resolve(
+        &cwd,
+        &CliPathOverrides {
+            tokens_root: explicit_path.map(|p| p.to_path_buf()),
+            mode_sets: mode_sets_dir,
+            components: components_dir,
+            fields: fields_dir,
+            ..Default::default()
+        },
+    )
+    .into_diagnostic()?;
 
     // Dataset path: explicit arg wins; otherwise use the resolved tokens root (which
     // comes from the config source, embedded snapshot, or in-repo CWD probing).
     let path = resolved.tokens_root.clone();
-    let graph = TokenGraph::from_json_dir(&path)
+    let graph = TokenGraph::open_cached(&path)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to load tokens from {}", path.display()))?;
     let token_count = graph.tokens.len();
@@ -1178,7 +1154,11 @@ fn run_primer(
             println!("Fields:        {}", taxonomy_fields.len());
             println!(
                 "Manifest:      {}",
-                if manifest.is_null() { "none" } else { "present" }
+                if manifest.is_null() {
+                    "none"
+                } else {
+                    "present"
+                }
             );
         }
     }
@@ -1188,7 +1168,9 @@ fn run_primer(
 
 fn run_component(id: &str, components_dir: Option<PathBuf>) -> miette::Result<ExitCode> {
     // Reject IDs that could escape the components directory via path traversal.
-    if !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         || id.is_empty()
         || !id.chars().next().is_some_and(|c| c.is_ascii_lowercase())
     {
@@ -1197,10 +1179,14 @@ fn run_component(id: &str, components_dir: Option<PathBuf>) -> miette::Result<Ex
     }
 
     let cwd = std::env::current_dir().into_diagnostic()?;
-    let resolved = data_source::resolve(&cwd, &CliPathOverrides {
-        components: components_dir,
-        ..Default::default()
-    }).into_diagnostic()?;
+    let resolved = data_source::resolve(
+        &cwd,
+        &CliPathOverrides {
+            components: components_dir,
+            ..Default::default()
+        },
+    )
+    .into_diagnostic()?;
     let dir = resolved
         .components
         .ok_or_else(|| miette::miette!("could not locate components directory"))?;
@@ -1237,7 +1223,7 @@ fn run_suggest(
     let target = path
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let graph = TokenGraph::from_json_dir(&target)
+    let graph = TokenGraph::open_cached(&target)
         .into_diagnostic()
         .wrap_err_with(|| format!("failed to load tokens from {}", target.display()))?;
 
@@ -1258,7 +1244,10 @@ fn run_suggest(
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&json_vals).into_diagnostic()?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_vals).into_diagnostic()?
+        );
     } else if results.is_empty() {
         println!("No matching tokens found for: {intent:?}");
     } else {
@@ -1276,6 +1265,36 @@ fn run_suggest(
         }
     }
 
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_cache_build(explicit_path: Option<&Path>, output: &Path) -> miette::Result<ExitCode> {
+    // Resolve the dataset: explicit arg wins, else the canonical resolved root.
+    let tokens_root = match explicit_path {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let cwd = std::env::current_dir().into_diagnostic()?;
+            let resolved =
+                data_source::resolve(&cwd, &CliPathOverrides::default()).into_diagnostic()?;
+            resolved.tokens_root
+        }
+    };
+
+    cache::build_file(&tokens_root, output)
+        .into_diagnostic()
+        .wrap_err_with(|| {
+            format!(
+                "failed to build cache from {} into {}",
+                tokens_root.display(),
+                output.display()
+            )
+        })?;
+
+    println!(
+        "Built cache from {} → {}",
+        tokens_root.display(),
+        output.display()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1311,9 +1330,7 @@ fn run_write(output: &Path, rationale: Option<&str>) -> miette::Result<ExitCode>
         );
         map.insert(
             "createdAt".to_string(),
-            serde_json::Value::String(
-                Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            ),
+            serde_json::Value::String(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         );
         serde_json::Value::Object(map)
     };
@@ -1354,12 +1371,15 @@ struct WriteTokenOpts<'a> {
     schema_path: Option<&'a Path>,
 }
 
-fn run_write_token(
-    key: &str,
-    target: &Path,
-    opts: WriteTokenOpts<'_>,
-) -> miette::Result<ExitCode> {
-    let WriteTokenOpts { token_json, token_file, product_context, rationale, is_override, schema_path } = opts;
+fn run_write_token(key: &str, target: &Path, opts: WriteTokenOpts<'_>) -> miette::Result<ExitCode> {
+    let WriteTokenOpts {
+        token_json,
+        token_file,
+        product_context,
+        rationale,
+        is_override,
+        schema_path,
+    } = opts;
     let token: serde_json::Value = match (token_json, token_file) {
         (Some(raw), _) => serde_json::from_str(raw)
             .into_diagnostic()
@@ -1390,9 +1410,7 @@ fn run_write_token(
             })
         })
         .ok_or_else(|| {
-            miette::miette!(
-                "cannot locate schemas directory; pass --schema-path explicitly"
-            )
+            miette::miette!("cannot locate schemas directory; pass --schema-path explicitly")
         })?;
 
     let registry = SchemaRegistry::load_legacy_token_schemas(&schemas_dir)
@@ -1556,9 +1574,13 @@ fn main() -> ExitCode {
             components_dir,
             fields_dir,
             mode_sets_dir,
-        } => {
-            run_primer(path.as_deref(), format, components_dir, fields_dir, mode_sets_dir)
-        }
+        } => run_primer(
+            path.as_deref(),
+            format,
+            components_dir,
+            fields_dir,
+            mode_sets_dir,
+        ),
         Commands::Component { id, components_dir } => run_component(&id, components_dir),
         Commands::Suggest {
             intent,
@@ -1566,16 +1588,8 @@ fn main() -> ExitCode {
             property,
             limit,
             format,
-        } => run_suggest(
-            &intent,
-            path.as_deref(),
-            property.as_deref(),
-            limit,
-            format,
-        ),
-        Commands::Write { output, rationale } => {
-            run_write(&output, rationale.as_deref())
-        }
+        } => run_suggest(&intent, path.as_deref(), property.as_deref(), limit, format),
+        Commands::Write { output, rationale } => run_write(&output, rationale.as_deref()),
         Commands::WriteToken {
             key,
             token_json,
@@ -1597,6 +1611,7 @@ fn main() -> ExitCode {
                 schema_path: schema_path.as_deref(),
             },
         ),
+        Commands::CacheBuild { path, output } => run_cache_build(path.as_deref(), &output),
         Commands::AuthoringSession { cmd } => {
             return authoring::run(cmd);
         }
