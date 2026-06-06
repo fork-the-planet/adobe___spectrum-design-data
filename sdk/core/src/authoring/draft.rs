@@ -210,6 +210,33 @@ pub fn build_name_object(property: &str, name_fields: &[NameFieldDto]) -> serde_
     serde_json::Value::Object(name_obj)
 }
 
+/// Canonical token key from a property name and name-field values.
+///
+/// Joins the non-empty trimmed parts with `-`, e.g. `"color"` + `["dark"]` →
+/// `Some("color-dark")`.  Returns `None` when every part is empty or whitespace,
+/// leaving the caller to choose an appropriate fallback:
+///
+/// - `session::derive_token_key` maps `None` → `"unnamed-token"` (MCP session behavior).
+/// - `tui::assemble_name_from_classification` maps `None` → `""` (preview shows nothing
+///   while the wizard is unfilled, so `build_write_input` can reject on empty).
+///
+/// This is the single source of truth for the join rule shared by both callers.
+pub fn derive_token_key_from_parts<'a>(
+    property: &'a str,
+    field_values: impl Iterator<Item = &'a str>,
+) -> Option<String> {
+    let parts: Vec<&str> = std::iter::once(property)
+        .chain(field_values)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("-"))
+    }
+}
+
 /// Recursively build a `sets` object from a slice of value rows.
 ///
 /// Rows are grouped by their first mode-combo dimension value; each group is
@@ -265,6 +292,45 @@ fn build_sets_from_rows(rows: &[ValueRowDto]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── derive_token_key_from_parts ────────────────────────────────────────────
+
+    #[test]
+    fn key_parts_joined_with_dash() {
+        assert_eq!(
+            derive_token_key_from_parts("color", ["dark", "hover"].iter().copied()),
+            Some("color-dark-hover".to_string())
+        );
+    }
+
+    #[test]
+    fn key_parts_skips_empty_fields() {
+        assert_eq!(
+            derive_token_key_from_parts("color", ["", "hover"].iter().copied()),
+            Some("color-hover".to_string())
+        );
+    }
+
+    #[test]
+    fn key_parts_only_property() {
+        assert_eq!(
+            derive_token_key_from_parts("color", std::iter::empty()),
+            Some("color".to_string())
+        );
+    }
+
+    #[test]
+    fn key_parts_all_empty_returns_none() {
+        assert_eq!(derive_token_key_from_parts("", std::iter::empty()), None);
+    }
+
+    #[test]
+    fn key_parts_whitespace_trimmed() {
+        assert_eq!(
+            derive_token_key_from_parts("  color  ", ["  dark  "].iter().copied()),
+            Some("color-dark".to_string())
+        );
+    }
 
     fn alias_row(modes: &[(&str, &str)], target: &str) -> ValueRowDto {
         ValueRowDto {
