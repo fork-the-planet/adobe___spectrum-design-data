@@ -498,15 +498,37 @@ fn render_intent_content(
             );
         }
     } else {
+        let sources: Vec<String> = suggestions
+            .iter()
+            .map(|s| {
+                s.file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .trim_end_matches(".tokens.json")
+                    .to_string()
+            })
+            .collect();
+        let source_col_width = sources
+            .iter()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0)
+            .min(24) as u16;
         let rows: Vec<Row> = suggestions
             .iter()
             .enumerate()
-            .map(|(i, s)| {
+            .zip(sources.iter())
+            .map(|((i, s), source)| {
                 let marker = if i == selected_suggestion { "▶" } else { " " };
                 let conf = format!("{:.0}%", s.confidence * 100.0);
                 Row::new(vec![
                     Cell::from(marker),
-                    Cell::from(s.token_name.as_str()),
+                    Cell::from(s.display_name()),
+                    Cell::from(Span::styled(
+                        source.clone(),
+                        Style::default().fg(theme.muted),
+                    )),
                     Cell::from(conf),
                 ])
             })
@@ -514,6 +536,7 @@ fn render_intent_content(
         let widths = [
             Constraint::Length(2),
             Constraint::Min(0),
+            Constraint::Length(source_col_width),
             Constraint::Length(5),
         ];
         let table =
