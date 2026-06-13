@@ -21,14 +21,16 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{DescribeView, QueryView, ResolveView, ValidateView};
+use crate::app::{DescribeView, QueryView, ResolveView, ValidateView, VisibleRow};
 use crate::model::views::{
     column_budget, truncate_cell, QUERY_NAME_PCT, RESOLVE_NAME_PCT, VALIDATE_TOKEN_PCT,
 };
 use crate::theme::Theme;
 
-/// Footer hint shown on list result views (query, resolve, validate).
+/// Footer hint shown on list result views (query, resolve).
 const LIST_HINT: &str = "j/k navigate · g/G top/bottom · y yank · Esc back";
+/// Footer hint shown on the validate view (includes Enter to expand/collapse groups).
+const VALIDATE_HINT: &str = "j/k navigate · Enter expand · g/G top/bottom · y yank · Esc back";
 /// Footer hint shown on the scrollable describe view.
 const DESCRIBE_HINT: &str = "j/k scroll · g/G top/bottom · PgUp/PgDn ×10 · Esc back";
 
@@ -45,7 +47,9 @@ fn render_hint(f: &mut Frame<'_>, text: &str, area: Rect, theme: &Theme) {
 
 /// Render a centered empty-state message inside a bordered block with `title`.
 fn render_empty_state(f: &mut Frame<'_>, title: &str, msg: &str, area: Rect, theme: &Theme) {
-    let block = Block::default().borders(Borders::ALL).title(title.to_string());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title.to_string());
     let inner = block.inner(area);
     f.render_widget(block, area);
     // Vertically center the message in the inner area.
@@ -63,12 +67,7 @@ fn render_empty_state(f: &mut Frame<'_>, title: &str, msg: &str, area: Rect, the
     );
 }
 
-pub(crate) fn render_query(
-    f: &mut Frame<'_>,
-    qv: &mut QueryView,
-    area: Rect,
-    theme: &Theme,
-) {
+pub(crate) fn render_query(f: &mut Frame<'_>, qv: &mut QueryView, area: Rect, theme: &Theme) {
     let [body, hint_area] = split_body_hint(area);
     let title = if qv.is_fuzzy {
         format!(" Fuzzy: /{} ", qv.expr_text)
@@ -121,12 +120,7 @@ pub(crate) fn render_query(
     render_hint(f, LIST_HINT, hint_area, theme);
 }
 
-pub(crate) fn render_resolve(
-    f: &mut Frame<'_>,
-    rv: &mut ResolveView,
-    area: Rect,
-    theme: &Theme,
-) {
+pub(crate) fn render_resolve(f: &mut Frame<'_>, rv: &mut ResolveView, area: Rect, theme: &Theme) {
     let [body, hint_area] = split_body_hint(area);
 
     if rv.rows.is_empty() {
@@ -197,17 +191,12 @@ pub(crate) fn render_describe(f: &mut Frame<'_>, dv: &DescribeView, area: Rect, 
     render_hint(f, DESCRIBE_HINT, hint_area, theme);
 }
 
-pub(crate) fn render_validate(
-    f: &mut Frame<'_>,
-    vv: &mut ValidateView,
-    area: Rect,
-    theme: &Theme,
-) {
+pub(crate) fn render_validate(f: &mut Frame<'_>, vv: &mut ValidateView, area: Rect, theme: &Theme) {
     let [body, hint_area] = split_body_hint(area);
 
     if vv.rows.is_empty() {
         render_empty_state(f, " Validate ", "All tokens valid ✓", body, theme);
-        render_hint(f, LIST_HINT, hint_area, theme);
+        render_hint(f, VALIDATE_HINT, hint_area, theme);
         return;
     }
 
@@ -218,18 +207,52 @@ pub(crate) fn render_validate(
         Cell::from("Token").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("Message").style(Style::default().add_modifier(Modifier::BOLD)),
     ]);
-    let rows: Vec<Row> = vv
-        .rows
+
+    // Split borrows so the closure can access `groups` and `rows` while iterating `visible`.
+    let visible = &vv.visible;
+    let groups = &vv.groups;
+    let rows_data = &vv.rows;
+    let rows: Vec<Row> = visible
         .iter()
-        .map(|r| {
-            Row::new(vec![
-                Cell::from(r.severity.as_str()),
-                Cell::from(r.rule_id.as_str()),
-                Cell::from(truncate_cell(&r.token, token_max)),
-                Cell::from(r.message.as_str()),
-            ])
+        .map(|vr| match vr {
+            VisibleRow::Group(g) => {
+                let group = &groups[*g];
+                if group.members.len() > 1 {
+                    // Multi-member group: show count badge + expand/collapse glyph.
+                    let toggle = if group.expanded { "▼" } else { "▶" };
+                    let badge = format!("×{} {}", group.members.len(), toggle);
+                    Row::new(vec![
+                        Cell::from(group.severity.clone()),
+                        Cell::from(group.rule_id.clone()),
+                        Cell::from(truncate_cell(&badge, token_max)),
+                        Cell::from(group.message.clone()),
+                    ])
+                } else {
+                    // Singleton: render flat, like the old per-row style.
+                    let row = &rows_data[group.members[0]];
+                    Row::new(vec![
+                        Cell::from(row.severity.clone()),
+                        Cell::from(row.rule_id.clone()),
+                        Cell::from(truncate_cell(&row.token, token_max)),
+                        Cell::from(row.message.clone()),
+                    ])
+                }
+            }
+            VisibleRow::Child(g, c) => {
+                // Expanded child: show indented token; severity/rule/message blank.
+                let row_idx = groups[*g].members[*c];
+                let row = &rows_data[row_idx];
+                let indented = format!("  {}", row.token);
+                Row::new(vec![
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(truncate_cell(&indented, token_max)),
+                    Cell::from(""),
+                ])
+            }
         })
         .collect();
+
     let widths = [
         Constraint::Length(7),
         Constraint::Percentage(12),
@@ -241,5 +264,5 @@ pub(crate) fn render_validate(
         .block(Block::default().borders(Borders::ALL).title(" Validate "))
         .row_highlight_style(Style::default().bg(theme.selection_bg));
     f.render_stateful_widget(table, body, &mut vv.table_state);
-    render_hint(f, LIST_HINT, hint_area, theme);
+    render_hint(f, VALIDATE_HINT, hint_area, theme);
 }

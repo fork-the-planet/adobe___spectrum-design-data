@@ -238,23 +238,130 @@ pub struct DiagnosticRow {
     pub message: String,
 }
 
+/// A group of diagnostics that share the same (rule_id, message) key.
+pub struct ValidateGroup {
+    pub rule_id: String,
+    pub message: String,
+    pub severity: String,
+    /// Indices into `ValidateView::rows`.
+    pub members: Vec<usize>,
+    pub expanded: bool,
+}
+
+/// A projected visible row in the validate table — either a group header or an
+/// expanded child showing an individual token.
+pub enum VisibleRow {
+    /// A group header; index into `ValidateView::groups`.
+    Group(usize),
+    /// An expanded child row; `(group_index, position_within_group.members)`.
+    Child(usize, usize),
+}
+
 /// State for a validate findings view.
 pub struct ValidateView {
     pub rows: Vec<DiagnosticRow>,
+    pub groups: Vec<ValidateGroup>,
+    pub visible: Vec<VisibleRow>,
     pub table_state: TableState,
 }
 
 impl ValidateView {
-    pub(crate) fn new(rows: Vec<DiagnosticRow>) -> Self {
+    pub fn new(rows: Vec<DiagnosticRow>) -> Self {
+        let groups = Self::build_groups(&rows);
+        let visible = Self::project_visible(&groups);
         let mut table_state = TableState::default();
-        if !rows.is_empty() {
+        if !visible.is_empty() {
             table_state.select(Some(0));
         }
-        Self { rows, table_state }
+        Self {
+            rows,
+            groups,
+            visible,
+            table_state,
+        }
     }
 
-    pub(crate) fn selected_row(&self) -> Option<&DiagnosticRow> {
-        self.table_state.selected().and_then(|i| self.rows.get(i))
+    fn build_groups(rows: &[DiagnosticRow]) -> Vec<ValidateGroup> {
+        let mut map: HashMap<(String, String), usize> = HashMap::new();
+        let mut groups: Vec<ValidateGroup> = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            let key = (row.rule_id.clone(), row.message.clone());
+            if let Some(&g) = map.get(&key) {
+                groups[g].members.push(i);
+            } else {
+                let g = groups.len();
+                map.insert(key, g);
+                groups.push(ValidateGroup {
+                    rule_id: row.rule_id.clone(),
+                    message: row.message.clone(),
+                    severity: row.severity.clone(),
+                    members: vec![i],
+                    expanded: false,
+                });
+            }
+        }
+        groups
+    }
+
+    fn project_visible(groups: &[ValidateGroup]) -> Vec<VisibleRow> {
+        let mut visible = Vec::new();
+        for (g, group) in groups.iter().enumerate() {
+            visible.push(VisibleRow::Group(g));
+            if group.expanded {
+                for c in 0..group.members.len() {
+                    visible.push(VisibleRow::Child(g, c));
+                }
+            }
+        }
+        visible
+    }
+
+    fn rebuild_visible(&mut self) {
+        self.visible = Self::project_visible(&self.groups);
+    }
+
+    /// Number of currently visible rows (groups + any expanded children).
+    pub fn visible_len(&self) -> usize {
+        self.visible.len()
+    }
+
+    /// Toggle expand/collapse for the group at the currently selected visible row.
+    /// Singletons (only one member) are a no-op. After rebuild, re-selects the
+    /// group header so the cursor stays on the same group.
+    pub(crate) fn toggle_selected(&mut self) {
+        let sel = match self.table_state.selected() {
+            Some(i) => i,
+            None => return,
+        };
+        let group_idx = match self.visible.get(sel) {
+            Some(VisibleRow::Group(g)) => *g,
+            Some(VisibleRow::Child(g, _)) => *g,
+            None => return,
+        };
+        if self.groups[group_idx].members.len() <= 1 {
+            return;
+        }
+        self.groups[group_idx].expanded = !self.groups[group_idx].expanded;
+        self.rebuild_visible();
+        // Re-select the group header at its new position in the visible list.
+        let new_sel = self
+            .visible
+            .iter()
+            .position(|v| matches!(v, VisibleRow::Group(g) if *g == group_idx));
+        self.table_state.select(new_sel);
+    }
+
+    /// Text to yank for the currently selected visible row.
+    /// A group header yanks the message; a child row yanks the token.
+    pub(crate) fn selected_text(&self) -> Option<String> {
+        let sel = self.table_state.selected()?;
+        match self.visible.get(sel)? {
+            VisibleRow::Group(g) => Some(self.groups[*g].message.clone()),
+            VisibleRow::Child(g, c) => {
+                let row_idx = self.groups[*g].members[*c];
+                Some(self.rows[row_idx].token.clone())
+            }
+        }
     }
 }
 
@@ -460,65 +567,4 @@ fn apply_scroll_delta(scroll: &mut u16, delta: i32) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{column_budget, truncate_cell};
-
-    // ── truncate_cell ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn truncate_cell_max_zero_passthrough() {
-        assert_eq!(truncate_cell("hello", 0), "hello");
-    }
-
-    #[test]
-    fn truncate_cell_short_string_unchanged() {
-        assert_eq!(truncate_cell("hi", 10), "hi");
-    }
-
-    #[test]
-    fn truncate_cell_exact_fit_no_ellipsis() {
-        // 5 ASCII chars, max 5 — should pass through unchanged.
-        assert_eq!(truncate_cell("abcde", 5), "abcde");
-    }
-
-    #[test]
-    fn truncate_cell_overflow_appends_ellipsis() {
-        // 6 chars, max 5 → truncate to 4 + `…`
-        let result = truncate_cell("abcdef", 5);
-        assert_eq!(result, "abcd…");
-    }
-
-    #[test]
-    fn truncate_cell_multibyte_latin_unchanged() {
-        // "café" is 4 display columns; max 5 → no truncation.
-        assert_eq!(truncate_cell("café", 5), "café");
-    }
-
-    #[test]
-    fn truncate_cell_wide_chars_by_columns_not_chars() {
-        // Each CJK char is 2 columns wide.
-        // "日本語テスト" = 6 chars = 12 columns. max 5 → budget 4 cols → 2 CJK chars + `…`
-        let result = truncate_cell("日本語テスト", 5);
-        assert_eq!(result, "日本…");
-    }
-
-    #[test]
-    fn truncate_cell_wide_char_exactly_fits() {
-        // 2 CJK chars = 4 display cols, max 4 → no truncation.
-        assert_eq!(truncate_cell("日本", 4), "日本");
-    }
-
-    // ── column_budget ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn column_budget_typical_query_name_col() {
-        // render_query: width 120, reserved 5, pct 40 → 46
-        assert_eq!(column_budget(120, 5, 40), 46);
-    }
-
-    #[test]
-    fn column_budget_reserved_exceeds_width_saturates_to_zero() {
-        // saturating_sub prevents underflow; result is 0 → truncate_cell passes through.
-        assert_eq!(column_budget(4, 10, 40), 0);
-    }
-}
+mod tests;

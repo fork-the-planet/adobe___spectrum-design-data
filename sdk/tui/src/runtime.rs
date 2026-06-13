@@ -31,8 +31,8 @@ use crate::model::Model;
 use crate::subscription::{subscriptions, Subscriptions, TICK_INTERVAL};
 use crate::task::Task;
 use crate::theme::Theme;
-use crate::update::update;
 use crate::update::ctx::UpdateCtx;
+use crate::update::update;
 use crate::view::draw;
 
 /// Run the TUI event loop until the user quits.
@@ -242,11 +242,39 @@ fn compute_hit_regions(model: &Model, status_height: u16, frame_area: Rect) -> V
             }
         }
         ActiveView::Validate(vv) => {
-            for (i, row) in vv.rows.iter().enumerate() {
+            use crate::app::VisibleRow;
+            for (i, vr) in vv.visible.iter().enumerate() {
                 let y = data_y + i as u16;
                 if i as u16 >= data_height {
                     break;
                 }
+                let text = match vr {
+                    VisibleRow::Group(g) => {
+                        let group = &vv.groups[*g];
+                        if group.members.len() > 1 {
+                            let toggle = if group.expanded { "▼" } else { "▶" };
+                            format!(
+                                "{}\t{}\t×{} {}\t{}",
+                                group.severity,
+                                group.rule_id,
+                                group.members.len(),
+                                toggle,
+                                group.message
+                            )
+                        } else {
+                            let row = &vv.rows[group.members[0]];
+                            format!(
+                                "{}\t{}\t{}\t{}",
+                                row.severity, row.rule_id, row.token, row.message
+                            )
+                        }
+                    }
+                    VisibleRow::Child(g, c) => {
+                        let row_idx = vv.groups[*g].members[*c];
+                        let row = &vv.rows[row_idx];
+                        format!("  {}", row.token)
+                    }
+                };
                 regions.push(HitRegion {
                     rect: Rect {
                         x: view_area.x,
@@ -255,10 +283,7 @@ fn compute_hit_regions(model: &Model, status_height: u16, frame_area: Rect) -> V
                         height: 1,
                     },
                     action: HitAction::SelectListRow(i),
-                    text: format!(
-                        "{}\t{}\t{}\t{}",
-                        row.severity, row.rule_id, row.token, row.message
-                    ),
+                    text,
                 });
             }
         }
@@ -272,8 +297,8 @@ mod tests {
     use super::*;
     use crate::message::Message;
     use crate::theme::Theme;
-    use crate::update::update;
     use crate::update::ctx::UpdateCtx;
+    use crate::update::update;
     use design_data_core::graph::{Layer, TokenGraph, TokenRecord};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -363,11 +388,8 @@ mod tests {
         for (i, region) in regions.iter().enumerate() {
             let y = region.rect.y;
             // Scan a few columns looking for a non-space character — the token name.
-            let has_content = (1..20u16).any(|x| {
-                buf.cell((x, y))
-                    .map(|c| c.symbol() != " ")
-                    .unwrap_or(false)
-            });
+            let has_content =
+                (1..20u16).any(|x| buf.cell((x, y)).map(|c| c.symbol() != " ").unwrap_or(false));
             assert!(
                 has_content,
                 "hit region {i} at y={y} has no rendered content in the buffer — \
