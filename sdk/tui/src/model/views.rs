@@ -75,6 +75,19 @@ impl StatusMessage {
     }
 }
 
+/// A transient overlay message that auto-dismisses after [`TOAST_DURATION`].
+///
+/// Unlike [`StatusMessage`] (which persists until overwritten), a toast is
+/// cleared automatically by a [`SubscriptionId::Named("toast")`] interval that
+/// fires once and then disappears when the model has no toast.
+///
+/// [`TOAST_DURATION`]: crate::subscription::TOAST_DURATION
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub text: String,
+    pub kind: StatusKind,
+}
+
 // ── View state types ──────────────────────────────────────────────────────────
 
 /// One row in the query results table.
