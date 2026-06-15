@@ -14,12 +14,12 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
     Frame,
 };
 
-use crate::find::{FindScreen, FindWizardState, MAX_PROPERTY_SUGGESTIONS, MAX_SUGGEST_RESULTS};
+use crate::find::{FindScreen, FindWizardState, MAX_SUGGEST_RESULTS};
 use crate::theme::Theme;
 
 // ── Find wizard entry ─────────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ pub(crate) fn render_find(
 
     let footer_text = match fs.screen {
         FindScreen::Filters => {
-            "Tab/Shift-Tab: next field  ↑↓: cycle property suggestions  Enter: preview  Esc: cancel"
+            "↑↓: select  Enter: accept  Tab/Shift-Tab: move  Enter on ▶Preview: search  Esc: cancel"
         }
         FindScreen::Preview => "Enter: open results  e: edit filters  Esc/q: cancel",
     };
@@ -63,7 +63,7 @@ pub(crate) fn render_find(
 
 fn render_filters_screen(f: &mut Frame<'_>, fs: &FindWizardState, area: Rect, theme: &Theme) {
     let foc = fs.focused_field;
-    let dropdown_h = (fs.suggestions.len() as u16).min(MAX_PROPERTY_SUGGESTIONS as u16);
+    let dropdown_h = fs.suggestions.len() as u16;
 
     // Build a dynamic constraint list: each of the 5 fields gets 1 row, plus an
     // optional dropdown row block inserted after whichever field is focused (0–3).
@@ -82,7 +82,11 @@ fn render_filters_screen(f: &mut Frame<'_>, fs: &FindWizardState, area: Rect, th
             constraints.push(Constraint::Length(dropdown_h));
         }
     }
-    constraints.push(Constraint::Length(1)); // match count
+    // Error row only shown when there is a parse problem; otherwise hidden (Length(0)
+    // wastes no space but keeps the chunk index math stable).
+    let has_error = fs.preview_error.is_some();
+    constraints.push(Constraint::Length(if has_error { 1 } else { 0 })); // error row
+    constraints.push(Constraint::Length(3)); // Preview button (bordered box)
     constraints.push(Constraint::Min(0)); // padding
 
     let chunks = Layout::default()
@@ -117,14 +121,18 @@ fn render_filters_screen(f: &mut Frame<'_>, fs: &FindWizardState, area: Rect, th
                 .suggestions
                 .iter()
                 .enumerate()
-                .map(|(i, term)| {
+                .map(|(i, opt)| {
                     let sel = i == fs.selected_suggestion;
                     let marker = if sel { "  ▸" } else { "   " };
-                    Row::new(vec![Cell::from(format!("{marker} {term}"))]).style(if sel {
+                    let label = format!("{marker} {} ({})", opt.value, opt.count);
+                    let style = if sel {
                         Style::default().bg(theme.selection_bg)
+                    } else if opt.count == 0 {
+                        Style::default().fg(theme.muted).add_modifier(Modifier::DIM)
                     } else {
                         Style::default().fg(theme.muted)
-                    })
+                    };
+                    Row::new(vec![Cell::from(label)]).style(style)
                 })
                 .collect();
             f.render_widget(Table::new(rows, [Constraint::Min(0)]), chunks[ci]);
@@ -132,18 +140,43 @@ fn render_filters_screen(f: &mut Frame<'_>, fs: &FindWizardState, area: Rect, th
         }
     }
 
-    // Match count.
-    let count_text = if let Some(ref err) = fs.preview_error {
-        format!("  parse error: {err}")
-    } else if !fs.preview_rows.is_empty() || fs.preview_count > 0 {
-        format!("  {} token(s) matched", fs.preview_count)
+    // Error row — only visible when preview_error is set (chunk height is 0 otherwise).
+    if has_error {
+        let err_text = format!(
+            "  parse error: {}",
+            fs.preview_error.as_deref().unwrap_or("")
+        );
+        f.render_widget(
+            Paragraph::new(err_text).style(Style::default().fg(theme.error)),
+            chunks[ci],
+        );
+    }
+    ci += 1;
+
+    // Preview button — the last Tab stop.  Highlighted when focused.
+    let btn_focused = foc == FindWizardState::PREVIEW_FOCUS;
+    let (btn_border_style, btn_text_style) = if btn_focused {
+        (
+            Style::default().fg(theme.accent),
+            Style::default().fg(theme.accent),
+        )
     } else {
-        "  (fill in filters then press Enter to preview)".to_string()
+        (
+            Style::default().fg(theme.muted),
+            Style::default().fg(theme.muted),
+        )
     };
-    f.render_widget(
-        Paragraph::new(count_text).style(Style::default().fg(theme.muted)),
-        chunks[ci],
-    );
+    let btn_label = if fs.preview_error.is_some() {
+        "  ▶ Preview — fix filters".to_string()
+    } else {
+        format!("  ▶ Preview {} token(s)  →", fs.preview_count)
+    };
+    let btn_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(btn_border_style);
+    let btn_inner = btn_block.inner(chunks[ci]);
+    f.render_widget(btn_block, chunks[ci]);
+    f.render_widget(Paragraph::new(btn_label).style(btn_text_style), btn_inner);
 }
 
 fn render_preview_screen(f: &mut Frame<'_>, fs: &FindWizardState, area: Rect, theme: &Theme) {
