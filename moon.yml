@@ -15,22 +15,21 @@ tasks:
       - pnpm
       - ava
       - test
-    platform: node
   pre-commit:
     command:
       - pnpm
       - lint-staged
-    platform: node
-    local: true
+    options:
+      runInCI: false
   prepare:
     command:
       - pnpm
       - "husky || true"
-    platform: node
-    local: true
+    options:
+      runInCI: false
   release:
     command:
       - pnpm
       - changeset publish
-    platform: node
-    local: true
+    options:
+      runInCI: false
