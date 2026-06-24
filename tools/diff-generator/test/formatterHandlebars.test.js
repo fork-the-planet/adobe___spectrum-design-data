@@ -751,33 +751,34 @@ test("HandlebarsFormatter with markdown template", (t) => {
     template: "markdown",
   });
 
-  // Test with real diff data
-  const result = {
-    renamed: {},
-    deprecated: {},
-    reverted: {},
-    added: { "new-token": {} },
-    deleted: {},
-    updated: { added: {}, deleted: {}, updated: {}, renamed: {} },
-  };
-
-  const options = { format: "markdown" };
   let output = "";
-  const mockOutput = (text) => {
-    output += text;
-  };
-
-  const success = formatter.printReport(result, mockOutput, options);
+  const success = formatter.printReport(
+    mockTokenDiffResult,
+    (text) => {
+      output += text;
+    },
+    { format: "markdown" },
+  );
 
   t.true(success);
   t.true(output.includes("Added"));
+  // GFM requires a blank line after </summary> for markdown bullets to render correctly.
+  // prettier (run by @changesets/apply-release-plan) collapses blank lines when the diff is
+  // nested inside a changelog list item. The `<!-- -->` comment separator makes the blank
+  // line prettier-resistant. Assert all 9 <details> sections have the separator.
+  const separatorMatches = (output.match(/<\/summary>\n\n<!-- -->/g) || [])
+    .length;
+  t.is(
+    separatorMatches,
+    9,
+    `Expected 9 <details> sections with blank line + <!-- --> after </summary>, found ${separatorMatches}`,
+  );
 });
 
 // Test the default export singleton formatter
 test("Default exported formatter instance", async (t) => {
-  const { default: defaultFormatter } = await import(
-    "../src/lib/formatterHandlebars.js"
-  );
+  const { default: defaultFormatter } =
+    await import("../src/lib/formatterHandlebars.js");
 
   t.truthy(defaultFormatter);
   t.is(typeof defaultFormatter.printReport, "function");
