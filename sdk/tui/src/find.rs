@@ -62,16 +62,9 @@ pub enum FindEvent {
     OpenResults(QueryView),
 }
 
-/// A single autocomplete candidate for a structured filter field.
-///
-/// `count` is the number of tokens that match the full filter when this value
-/// is applied to the focused field given the other fields already set.
-/// `count == 0` signals an incompatible value — the view renders it dimmed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FacetOption {
-    pub value: String,
-    pub count: usize,
-}
+// FacetOption is defined in wizard_common::facet so it can be shared with the
+// authoring wizard's classification screen.
+pub use crate::wizard_common::facet::FacetOption;
 
 /// All state for the two-screen find wizard.
 pub struct FindWizardState {
@@ -543,5 +536,7 @@ fn suggestion_to_row(s: &suggest::SuggestionResult) -> QueryRow {
         value,
         file,
         layer: layer.to_string(),
+        uuid: s.token_uuid.clone(),
+        source_path: s.file.clone(),
     }
 }
