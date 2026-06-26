@@ -182,10 +182,16 @@ export function decompose(tokenName, tokenData, registry, sourceFile) {
     }
   }
 
-  // Sort by: longer matches first, then by field priority
+  // Sort by: longer matches first, then by field priority.
+  // Fields not in fieldPriority (e.g. colorFamily, colorRole, weight) get Infinity
+  // so they sort AFTER all listed fields, not before them (indexOf returns -1 otherwise).
+  const priority = (f) => {
+    const i = fieldPriority.indexOf(f);
+    return i === -1 ? Infinity : i;
+  };
   positionMatches.sort((a, b) => {
     if (b.length !== a.length) return b.length - a.length;
-    return fieldPriority.indexOf(a.field) - fieldPriority.indexOf(b.field);
+    return priority(a.field) - priority(b.field);
   });
 
   // Greedily assign matches, skipping conflicts
@@ -227,6 +233,53 @@ export function decompose(tokenName, tokenData, registry, sourceFile) {
           description:
             "Numeric scale index has no field in the 13-field taxonomy",
         });
+      }
+    }
+  }
+
+  // Phase 4.5: Color-domain promotion
+  // colorFamily/colorRole have Infinity priority so they don't steal segments
+  // from object, size, etc. in non-color tokens. But when context confirms a
+  // color domain, matched variant/object fields are promoted to the color taxonomy.
+  //
+  //   Palette ramp (scaleIndex + no component):
+  //     variant:"blue" → colorFamily:"blue"
+  //   Component color (property:"color" + component):
+  //     variant:<hue>  → colorFamily:<hue>, then object:<role> → colorRole:<role>
+  //     variant:<role> → colorRole:<role>  (no-hue tokens, e.g. color-primary)
+  {
+    const hueSet = registry.byField["colorFamily"] || new Set();
+    const roleSet = registry.byField["colorRole"] || new Set();
+
+    // Palette ramp: scaleIndex assigned, no component
+    if (
+      nameObject.scaleIndex !== undefined &&
+      nameObject.component === undefined
+    ) {
+      if (nameObject.variant !== undefined && hueSet.has(nameObject.variant)) {
+        nameObject.colorFamily = nameObject.variant;
+        delete nameObject.variant;
+      }
+    }
+
+    // Component color: property === "color" + component present
+    if (nameObject.property === "color" && nameObject.component !== undefined) {
+      if (nameObject.variant !== undefined && hueSet.has(nameObject.variant)) {
+        // Hue in variant → promote to colorFamily; also promote object → colorRole alongside it
+        nameObject.colorFamily = nameObject.variant;
+        delete nameObject.variant;
+        if (nameObject.object !== undefined && roleSet.has(nameObject.object)) {
+          nameObject.colorRole = nameObject.object;
+          delete nameObject.object;
+        }
+      } else if (
+        nameObject.variant !== undefined &&
+        roleSet.has(nameObject.variant) &&
+        !hueSet.has(nameObject.variant)
+      ) {
+        // Role in variant (no hue) → promote to colorRole (e.g. icon-color-primary-default)
+        nameObject.colorRole = nameObject.variant;
+        delete nameObject.variant;
       }
     }
   }
@@ -348,6 +401,13 @@ export function decompose(tokenName, tokenData, registry, sourceFile) {
  * Uses tokenNameMap to output long-form aliases (e.g., xl → extra-large)
  * for legacy compatibility.
  *
+ * Color-domain tokens use explicit ordering that mirrors the Rust naming.rs
+ * color-domain branch, bypassing the position-ordered general walk (which
+ * would mis-order state@12 before colorFamily@17):
+ *   palette ramp (no component): {variant?}-{colorFamily}-{scaleIndex?}
+ *   component color (component + colorFamily/colorRole):
+ *     {component}-{property}-{colorFamily?}-{colorRole?}-{state?}
+ *
  * @param {object} nameObject
  * @param {object} tokenNameMap - id → tokenName for legacy alias expansion
  * @param {string[]} [serializationOrder] - ordered field names from field catalog
@@ -357,6 +417,37 @@ export function serialize(
   tokenNameMap = {},
   serializationOrder = FALLBACK_SERIALIZATION_ORDER,
 ) {
+  const { colorFamily, colorRole, component } = nameObject;
+
+  // Palette ramp: colorFamily present, no component → {variant?}-{colorFamily}-{scaleIndex?}
+  if (colorFamily && !component) {
+    const parts = [];
+    if (nameObject.variant)
+      parts.push(tokenNameMap[nameObject.variant] || nameObject.variant);
+    parts.push(tokenNameMap[colorFamily] || colorFamily);
+    if (nameObject.scaleIndex != null)
+      parts.push(String(nameObject.scaleIndex));
+    return parts.join("-");
+  }
+
+  // Component color: component + (colorFamily and/or colorRole) AND property === "color".
+  // The property guard prevents this branch from firing when colorRole terms (e.g. "background",
+  // "primary") match a non-color token via the decomposer, which would drop other fields.
+  // → {component}-{property}-{colorFamily?}-{colorRole?}-{state?}
+  if (
+    component &&
+    (colorFamily || colorRole) &&
+    nameObject.property === "color"
+  ) {
+    const parts = [component, nameObject.property];
+    if (colorFamily) parts.push(tokenNameMap[colorFamily] || colorFamily);
+    if (colorRole) parts.push(tokenNameMap[colorRole] || colorRole);
+    if (nameObject.state)
+      parts.push(tokenNameMap[nameObject.state] || nameObject.state);
+    return parts.join("-");
+  }
+
+  // General path (non-color tokens)
   const parts = [];
   for (const field of serializationOrder) {
     if (nameObject[field]) {
