@@ -2,7 +2,7 @@
 // This file is licensed to you under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License. You may obtain a copy
 // of the License at http://www.apache.org/licenses/LICENSE-2.0
-
+//
 // Unless required by applicable law or agreed to in writing, software distributed under
 // the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR REPRESENTATIONS
 // OF ANY KIND, either express or implied. See the License for the specific language
@@ -14,64 +14,124 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { loadRegistries } from "../src/registry-index.js";
 import { serialize } from "../src/decomposer.js";
-import { applyField } from "../src/apply.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CASCADE_DIR = resolve(__dirname, "../../../packages/design-data/tokens");
 
-test("applyField extracts size and each patched name roundtrips", (t) => {
+/** Recursively collect every token object that has a name.size field. */
+function collectMigrated(obj, acc = []) {
+  if (Array.isArray(obj)) {
+    obj.forEach((v) => collectMigrated(v, acc));
+    return acc;
+  }
+  if (obj && typeof obj === "object") {
+    if (
+      obj.name &&
+      typeof obj.name === "object" &&
+      obj.name.size !== undefined
+    ) {
+      acc.push(obj);
+    }
+    for (const v of Object.values(obj)) collectMigrated(v, acc);
+  }
+  return acc;
+}
+
+// Verifies that size decomposition preserved the legacy key for every migrated token.
+//
+// The check is independent of decompose() by reconstructing the pre-migration name
+// object from scratch: since size was the only field extracted from property, the
+// pre-migration property = postMigration.property + "-" + sizeTokenName. Serializing
+// that name must produce the same legacy key as serializing the post-migration name.
+//
+// This is the JS-layer consistency check. The Rust-backed golden-reference check is
+// tokens:verifyLegacyOutput (compares generated legacy output against committed src/).
+test("size decomposition preserves the legacy key — layout-component.tokens.json", (t) => {
   const registry = loadRegistries();
-  const tokens = JSON.parse(
+  const data = JSON.parse(
     readFileSync(resolve(CASCADE_DIR, "layout-component.tokens.json"), "utf-8"),
   );
+  const migrated = collectMigrated(data);
 
-  // Snapshot the legacy keys before patching
-  const originalKeys = new Map(
-    tokens
-      .filter((tok) => typeof tok.name === "object")
-      .map((tok) => [
-        tok.uuid,
-        serialize(tok.name, registry.tokenNameMap, registry.serializationOrder),
-      ]),
+  t.true(
+    migrated.length > 0,
+    "Expected at least one token with size field in layout-component.tokens.json",
   );
 
-  // Deep-clone so we don't mutate the shared parse
-  const cloned = tokens.map((tok) => ({
-    ...tok,
-    name: typeof tok.name === "object" ? { ...tok.name } : tok.name,
-  }));
-
-  const applied = applyField(
-    cloned,
-    "size",
-    registry,
-    "layout-component.tokens.json",
-  );
-  t.true(applied > 0, "Should apply at least one size decomposition");
-
-  // Every patched token must still serialize to its original legacy key
-  const patched = cloned.filter(
-    (tok, i) =>
-      typeof tok.name === "object" &&
-      tok.name.size !== undefined &&
-      tokens[i].name?.size === undefined,
-  );
-
-  for (const tok of patched) {
-    const original = originalKeys.get(tok.uuid);
-    const roundtripped = serialize(
+  for (const tok of migrated) {
+    // Post-migration serialization.
+    const postKey = serialize(
       tok.name,
       registry.tokenNameMap,
       registry.serializationOrder,
     );
+
+    // Reconstruct the pre-migration name: re-embed the size tokenName back into
+    // property. Only size was extracted, so appending its long form gives the original
+    // compound property value. Note: this reconstruction is only valid when a single
+    // field was decomposed; multi-field migrations need a different approach.
+    const sizeLong = registry.tokenNameMap[tok.name.size] ?? tok.name.size;
+    const preMigName = {
+      ...tok.name,
+      property: `${tok.name.property}-${sizeLong}`,
+    };
+    delete preMigName.size;
+    const preKey = serialize(
+      preMigName,
+      registry.tokenNameMap,
+      registry.serializationOrder,
+    );
+
     t.is(
-      roundtripped,
-      original,
-      `Token ${tok.uuid?.slice(0, 8)} must roundtrip after size decomposition`,
+      postKey,
+      preKey,
+      `Token ${tok.uuid?.slice(0, 8)}: size decomposition must preserve the legacy key (pre: ${preKey})`,
     );
     t.truthy(
       tok.name.property,
-      `Token ${tok.uuid?.slice(0, 8)} must still have a non-empty property`,
+      `Token ${tok.uuid?.slice(0, 8)}: must have non-empty property after decomposition`,
+    );
+  }
+});
+
+test("size decomposition preserves the legacy key — layout.tokens.json", (t) => {
+  const registry = loadRegistries();
+  const data = JSON.parse(
+    readFileSync(resolve(CASCADE_DIR, "layout.tokens.json"), "utf-8"),
+  );
+  const migrated = collectMigrated(data);
+
+  t.true(
+    migrated.length > 0,
+    "Expected at least one token with size field in layout.tokens.json",
+  );
+
+  for (const tok of migrated) {
+    const postKey = serialize(
+      tok.name,
+      registry.tokenNameMap,
+      registry.serializationOrder,
+    );
+    const sizeLong = registry.tokenNameMap[tok.name.size] ?? tok.name.size;
+    const preMigName = {
+      ...tok.name,
+      property: `${tok.name.property}-${sizeLong}`,
+    };
+    delete preMigName.size;
+    const preKey = serialize(
+      preMigName,
+      registry.tokenNameMap,
+      registry.serializationOrder,
+    );
+
+    t.is(
+      postKey,
+      preKey,
+      `Token ${tok.uuid?.slice(0, 8)}: size decomposition must preserve the legacy key (pre: ${preKey})`,
+    );
+    t.truthy(
+      tok.name.property,
+      `Token ${tok.uuid?.slice(0, 8)}: must have non-empty property after decomposition`,
     );
   }
 });
