@@ -92,7 +92,8 @@
     {
       "name": "track-size",
       "description": "The connecting track between steps."
-    }
+    },
+    { "name": "track" }
   ],
   "lifecycle": { "introduced": "1.0.0-draft" },
   "tokenBindings": [

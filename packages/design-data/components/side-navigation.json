@@ -137,7 +137,8 @@
     {
       "name": "trailing-accessory-area",
       "description": "Trailing area for accessory content such as counts or actions."
-    }
+    },
+    { "name": "indicator" }
   ],
   "states": [
     { "name": "hover", "trigger": "interaction" },

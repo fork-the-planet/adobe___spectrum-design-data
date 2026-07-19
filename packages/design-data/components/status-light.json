@@ -105,7 +105,8 @@
     {
       "name": "visual-300",
       "description": "Severity dot, 300 size variant."
-    }
+    },
+    { "name": "dot" }
   ],
   "lifecycle": { "introduced": "1.0.0-draft" },
   "tokenBindings": [

@@ -62,7 +62,8 @@
     {
       "name": "item-counter",
       "description": "Badge showing a count of items or actions."
-    }
+    },
+    { "name": "counter" }
   ],
   "lifecycle": { "introduced": "1.0.0-draft" },
   "tokenBindings": [

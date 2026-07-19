@@ -139,7 +139,10 @@
     {
       "name": "text-field",
       "description": "Editable numeric value field."
-    }
+    },
+    { "name": "handle" },
+    { "name": "track" },
+    { "name": "control" }
   ],
   "states": [
     { "name": "hover", "trigger": "interaction" },

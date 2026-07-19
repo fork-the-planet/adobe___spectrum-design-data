@@ -210,7 +210,9 @@
   "states": [
     { "name": "hover", "trigger": "interaction" },
     { "name": "down", "trigger": "interaction" },
-    { "name": "keyboard-focus", "trigger": "interaction" }
+    { "name": "keyboard-focus", "trigger": "interaction" },
+    { "name": "default", "trigger": "prop" },
+    { "name": "disabled", "trigger": "prop" }
   ],
   "lifecycle": { "introduced": "1.0.0-draft" },
   "tokenBindings": [
